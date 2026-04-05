@@ -5,6 +5,13 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from pathlib import Path
 from scipy.optimize import curve_fit
+from courbes_et_fits import (
+    plot_courbe_ajustee,
+    plot_grille_vs_distance,
+    plot_grille_vs_tension,
+    plot_multi_serie_vs_distance,
+    plot_serie_vs_distance,
+)
 
 # python3 mesures/Imageur_beta/fit_somme_gaussiennes.py mesures/Imageur_beta/5760-40.csv --min-gauss 2 --max-gauss 2
 
@@ -120,114 +127,46 @@ class Traceur:
         log_x: bool = False,
         log_y: bool = False,
     ) -> None:
-        plt.figure()
-        for i, tension in enumerate(jeu_donnees.tensions):
-            x = jeu_donnees.distances
-            y = jeu_donnees.moyenne[:, i]
-            yerr = jeu_donnees.ecart_type[:, i]
-            masque = np.ones_like(x, dtype=bool)
-            if log_x:
-                masque &= x > 0
-            if log_y:
-                x = x[masque]
-                y = y[masque]
-                yerr = yerr[masque]
-                masque = y > 0
-            x = x[masque]
-            y = y[masque]
-            yerr = yerr[masque]
-            if x.size == 0:
-                continue
-            plt.errorbar(
-                x,
-                y,
-                yerr,
-                marker="o",
-                linestyle="-",
-                capsize=5,
-                label=f"U = {tension:g} V",
-            )
-        plt.xlabel("Distance (m)")
-        plt.ylabel("Compteur")
-        plt.title(titre)
-        if log_x:
-            plt.xscale("log")
-        if log_y:
-            plt.yscale("log")
-        plt.legend()
-        plt.grid(True)
-        plt.show()
+        plot_grille_vs_distance(
+            distances=jeu_donnees.distances,
+            tensions=jeu_donnees.tensions,
+            moyenne=jeu_donnees.moyenne,
+            ecart_type=jeu_donnees.ecart_type,
+            titre=titre,
+            log_x=log_x,
+            log_y=log_y,
+        )
 
     @staticmethod
     def grille_vs_tension(jeu_donnees: JeuDonneesGrille, titre: str, log_y: bool = False) -> None:
-        plt.figure()
-        for i, distance in enumerate(jeu_donnees.distances):
-            x = jeu_donnees.tensions
-            y = jeu_donnees.moyenne[i, :]
-            yerr = jeu_donnees.ecart_type[i, :]
-            if log_y:
-                masque = y > 0
-                x = x[masque]
-                y = y[masque]
-                yerr = yerr[masque]
-                if x.size == 0:
-                    continue
-            plt.errorbar(
-                x,
-                y,
-                yerr,
-                marker="o",
-                linestyle="-",
-                capsize=5,
-                label=f"D = {distance:g} m",
-            )
-        plt.xlabel("Tension (V)")
-        plt.ylabel("Compteur")
-        plt.title(titre)
-        if log_y:
-            plt.yscale("log")
-        plt.legend()
-        plt.grid(True)
-        plt.show()
+        plot_grille_vs_tension(
+            distances=jeu_donnees.distances,
+            tensions=jeu_donnees.tensions,
+            moyenne=jeu_donnees.moyenne,
+            ecart_type=jeu_donnees.ecart_type,
+            titre=titre,
+            log_y=log_y,
+        )
 
     @staticmethod
     def serie_vs_distance(jeu_donnees: JeuDonneesSerie, titre: str) -> None:
-        plt.figure()
-        plt.errorbar(
-            jeu_donnees.distances,
-            jeu_donnees.moyenne,
-            jeu_donnees.ecart_type,
-            marker="o",
-            linestyle="-",
-            capsize=5,
+        plot_serie_vs_distance(
+            distances=jeu_donnees.distances,
+            moyenne=jeu_donnees.moyenne,
+            ecart_type=jeu_donnees.ecart_type,
+            titre=titre,
             label=jeu_donnees.nom,
         )
-        plt.xlabel("Distance (m)")
-        plt.ylabel("Compteur")
-        plt.title(titre)
-        plt.legend()
-        plt.grid(True)
-        plt.show()
 
     @staticmethod
     def multi_serie_vs_distance(jeu_donnees: JeuDonneesMultiSerie, titre: str) -> None:
-        plt.figure()
-        for i, categorie in enumerate(jeu_donnees.categories):
-            plt.errorbar(
-                jeu_donnees.distances,
-                jeu_donnees.moyenne[i, :],
-                jeu_donnees.ecart_type[i, :],
-                marker="o",
-                linestyle="-",
-                capsize=5,
-                label=f"{int(categorie)} plaque(s)",
-            )
-        plt.xlabel("Distance (m)")
-        plt.ylabel("Compteur")
-        plt.title(titre)
-        plt.legend()
-        plt.grid(True)
-        plt.show()
+        plot_multi_serie_vs_distance(
+            distances=jeu_donnees.distances,
+            categories=jeu_donnees.categories,
+            moyenne=jeu_donnees.moyenne,
+            ecart_type=jeu_donnees.ecart_type,
+            titre=titre,
+        )
 
     @staticmethod
     def courbe_ajustee(
@@ -239,15 +178,15 @@ class Traceur:
         titre: str,
         etiquette: str
         ) -> None:
-        plt.figure()
-        plt.errorbar(x, y, yerr=y_erreur, fmt="o", capsize=4, label="Données")
-        plt.plot(x_fit, y_fit, label=etiquette)
-        plt.title(titre)
-        plt.xlabel("Distance (m)")
-        plt.ylabel("Compteur")
-        plt.legend()
-        plt.grid(True)
-        plt.show()
+        plot_courbe_ajustee(
+            x=x,
+            y=y,
+            y_erreur=y_erreur,
+            x_fit=x_fit,
+            y_fit=y_fit,
+            titre=titre,
+            etiquette=etiquette,
+        )
 
 
 class ModelesFit:
