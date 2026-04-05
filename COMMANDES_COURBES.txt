@@ -1,0 +1,43 @@
+COMMANDES POUR AFFICHER LES COURBES
+
+Geiger (graphes):
+python3 main.py --graphe geiger_1_distance
+python3 main.py --graphe geiger_1_tension
+python3 main.py --graphe geiger_2_distance
+python3 main.py --graphe geiger_2_tension
+python3 main.py --graphe attenuation_plomb
+python3 main.py --graphe geiger_2_distance_avec_plomb
+
+Geiger (courbes avec fit):
+python3 main.py --fit geiger_1_distance_modele_1
+python3 main.py --fit geiger_2_distance_modele_1
+python3 main.py --fit geiger_2_distance_modele_2
+python3 main.py --fit attenuation_plomb_modele_1
+python3 main.py --fit attenuation_plomb_modele_2
+
+Imageur beta (une courbe + fit double gaussiennes):
+python3 courbes_et_fits.py single Mesures/Imageur_beta/XXXX-YY-Z.csv
+        XXXX = tension, YY = débit, Z = numéro de la mesure
+
+Imageur beta (agregation + courbes max/FWHM vs tension et vs debit + fits lineaires):
+python3 courbes_et_fits.py maxima
+
+Fichiers de sortie imageur beta:
+Mesures/Imageur_beta/analyse/extraction_gaussiennes.csv
+Mesures/Imageur_beta/analyse/max_vs_tension_*.png
+Mesures/Imageur_beta/analyse/fwhm_vs_tension_*.png
+Mesures/Imageur_beta/analyse/max_vs_debit_*.png
+Mesures/Imageur_beta/analyse/fwhm_vs_debit_*.png
+
+Affichage des graphes (fenetres):
+- Afficher tous les graphes Geiger:
+python3 main.py --plots all --fits none
+
+- Afficher un graphe Geiger precis (exemple):
+python3 main.py --graphe geiger_2_tension
+
+- Afficher une courbe Imageur beta + son fit double gaussiennes (exemple):
+python3 courbes_et_fits.py single Mesures/Imageur_beta/5800-40.csv
+
+- Afficher les graphes agreges Imageur beta (max/FWHM vs tension et vs debit):
+python3 courbes_et_fits.py maxima

@@ -13,7 +13,7 @@ from courbes_et_fits import (
     plot_serie_vs_distance,
 )
 
-# python3 mesures/Imageur_beta/fit_somme_gaussiennes.py mesures/Imageur_beta/5760-40.csv --min-gauss 2 --max-gauss 2
+# Exemple imageur beta: python3 courbes_et_fits.py single Mesures/Imageur_beta/5760-40.csv
 
 
 @dataclass(frozen=True)
