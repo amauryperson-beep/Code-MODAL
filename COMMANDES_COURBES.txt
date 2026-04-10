@@ -17,33 +17,25 @@ python3 main.py --fit geiger_2_distance_modele_2
 python3 main.py --fit attenuation_plomb_modele_1
 python3 main.py --fit attenuation_plomb_modele_2
 
-Geiger (pipeline complet):
-# 1) Donnees brutes dans: Mesures/Geiger/Données brutes
-#    Fichiers attendus:
-#    - geiger_1_grille.csv
-#    - geiger_2_grille.csv
-#    - geiger_1_plomb.csv
-#    - geiger_2_plomb.csv
-# 2) Regenerer les CSV par experience dans Mesures/Geiger
-python3 traitement_geiger.py
-
 
 
 Imageur beta (pipeline complet):
-# 1) Donnees brutes dans: Mesures/Imageur_beta/Données brutes (format: tension-debit-numero.csv)
-# 2) Agrege les courbes en fichiers tension-debit.csv a la racine de Mesures/Imageur_beta
-# 3) Extrait les parametres de fit gaussien dans:
+# 1) Les fichiers agregees tension-debit.csv doivent etre presents dans Mesures/Imageur_beta
+# 2) Extrait les parametres de fit gaussien (I_max, incertitude sur I_max, gaussiennes) dans:
 #    Mesures/Imageur_beta/extractions_gaussiennes.csv
 python3 traitement_imageur_beta.py
 
 Imageur beta (afficher I_max en fonction de la tension, debit=40):
 python3 courbes_et_fits.py imageur-i-max-vs-tension --debit 40
 
-Imageur beta (afficher largeur a mi-hauteur en fonction de la tension, debit=40):
-python3 courbes_et_fits.py imageur-fwhm-vs-tension --debit 40
+Imageur beta (afficher largeur_mh en fonction de la tension, debit=40):
+python3 courbes_et_fits.py imageur-largeur-mh-vs-tension --debit 40
 
 Imageur beta (afficher I_max en fonction du debit, tension=6000):
 python3 courbes_et_fits.py imageur-i-max-vs-debit --tension 6000
 
-Imageur beta (afficher largeur a mi-hauteur en fonction du debit, tension=6000):
-python3 courbes_et_fits.py imageur-fwhm-vs-debit --tension 6000
+Imageur beta (afficher largeur_mh en fonction du debit, tension=6000):
+python3 courbes_et_fits.py imageur-largeur-mh-vs-debit --tension 6000
+
+Imageur beta (afficher metrique_1..4 en fonction de la tension, debit=40, a=0.5):
+python3 courbes_et_fits.py imageur-metriques-vs-tension --debit 40 --a 0.5

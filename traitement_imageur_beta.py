@@ -16,7 +16,7 @@ from scipy.signal import find_peaks
 PIXEL_MIN: float | None = None
 PIXEL_MAX: float | None = None
 
-FWHM_FACTOR = 2.3548200450309493
+LARGEUR_MH_FACTOR = 2.3548200450309493
 
 
 def parse_raw_filename(path_csv: Path) -> tuple[float, float, int]:
@@ -24,6 +24,13 @@ def parse_raw_filename(path_csv: Path) -> tuple[float, float, int]:
     if not m:
         raise ValueError(f"Nom invalide: {path_csv.name} (attendu: tension-debit-numero.csv)")
     return float(m.group(1)), float(m.group(2)), int(m.group(3))
+
+
+def parse_aggregated_filename(path_csv: Path) -> tuple[float, float]:
+    m = re.match(r"^([0-9]+(?:\.[0-9]+)?)\-([0-9]+(?:\.[0-9]+)?)\.csv$", path_csv.name)
+    if not m:
+        raise ValueError(f"Nom invalide: {path_csv.name} (attendu: tension-debit.csv)")
+    return float(m.group(1)), float(m.group(2))
 
 
 def _fmt_number(v: float) -> str:
@@ -65,7 +72,44 @@ def load_two_col_csv(path_csv: Path) -> tuple[np.ndarray, np.ndarray, str, str]:
     return x[idx], y[idx], x_name, y_name
 
 
-def crop_curve(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def load_aggregated_curve(path_csv: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, str]:
+    with path_csv.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames or len(reader.fieldnames) < 2:
+            raise ValueError(f"{path_csv}: header invalide.")
+        rows = list(reader)
+        if not rows:
+            raise ValueError(f"{path_csv}: vide.")
+        x_name = reader.fieldnames[0]
+        y_name = reader.fieldnames[1]
+        yerr_name = reader.fieldnames[2] if len(reader.fieldnames) >= 3 else None
+
+    x_vals: list[float] = []
+    y_vals: list[float] = []
+    yerr_vals: list[float] = []
+    for i, row in enumerate(rows, start=2):
+        xs = (row.get(x_name) or "").strip()
+        ys = (row.get(y_name) or "").strip()
+        if not xs and not ys:
+            continue
+        if not xs or not ys:
+            raise ValueError(f"{path_csv}: ligne incomplete {i}.")
+        x_vals.append(float(xs))
+        y_vals.append(float(ys))
+        if yerr_name is not None:
+            yerrs = (row.get(yerr_name) or "").strip()
+            yerr_vals.append(float(yerrs) if yerrs else 0.0)
+        else:
+            yerr_vals.append(0.0)
+
+    x = np.asarray(x_vals, dtype=float)
+    y = np.asarray(y_vals, dtype=float)
+    yerr = np.asarray(yerr_vals, dtype=float)
+    idx = np.argsort(x)
+    return x[idx], y[idx], yerr[idx], x_name, y_name
+
+
+def crop_curve(x: np.ndarray, y: np.ndarray, yerr: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     mask = np.ones_like(x, dtype=bool)
     if PIXEL_MIN is not None:
         mask &= x >= float(PIXEL_MIN)
@@ -73,9 +117,10 @@ def crop_curve(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         mask &= x <= float(PIXEL_MAX)
     xc = x[mask]
     yc = y[mask]
+    yerrc = yerr[mask] if yerr is not None else None
     if xc.size < 6:
         raise ValueError("Pas assez de points apres decoupe pixel.")
-    return xc, yc
+    return xc, yc, yerrc
 
 
 def multi_gaussian_2(
@@ -136,17 +181,21 @@ def initial_guess_2g(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     return p0
 
 
-def sort_by_mu(params: np.ndarray, perr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    g1 = (params[1:4], perr[1:4])
-    g2 = (params[4:7], perr[4:7])
-    pairs = [g1, g2]
-    pairs.sort(key=lambda pair: pair[0][1])
-    p_sorted = np.concatenate([[params[0]], pairs[0][0], pairs[1][0]])
-    e_sorted = np.concatenate([[perr[0]], pairs[0][1], pairs[1][1]])
-    return p_sorted, e_sorted
+def sort_by_mu(params: np.ndarray, covariance: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if params[2] <= params[5]:
+        permutation = np.arange(len(params), dtype=int)
+    else:
+        permutation = np.array([0, 4, 5, 6, 1, 2, 3], dtype=int)
+    params_tries = params[permutation]
+    covariance_tries = covariance[np.ix_(permutation, permutation)]
+    return params_tries, covariance_tries
 
 
-def fit_curve(x: np.ndarray, y: np.ndarray, yerr: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, float, float]:
+def fit_curve(
+    x: np.ndarray,
+    y: np.ndarray,
+    yerr: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
     p0 = initial_guess_2g(x, y)
     x_min = float(np.min(x))
     x_max = float(np.max(x))
@@ -182,8 +231,8 @@ def fit_curve(x: np.ndarray, y: np.ndarray, yerr: np.ndarray | None = None) -> t
         absolute_sigma=True,
         maxfev=250000,
     )
-    perr = np.sqrt(np.maximum(np.diag(pcov), 0.0))
-    params, params_err = sort_by_mu(popt, perr)
+    params, covariance = sort_by_mu(popt, pcov)
+    params_err = np.sqrt(np.maximum(np.diag(covariance), 0.0))
 
     y_hat = multi_gaussian_2(x, *params)
     resid = y - y_hat
@@ -191,10 +240,50 @@ def fit_curve(x: np.ndarray, y: np.ndarray, yerr: np.ndarray | None = None) -> t
     dof = len(x) - len(params)
     chi2_red = chi2 / dof if dof > 0 else float("nan")
     rmse = float(np.sqrt(np.mean(resid**2)))
-    return params, params_err, chi2_red, rmse
+    return params, params_err, covariance, chi2_red, rmse
 
 
-def derive_metrics(params: np.ndarray, params_err: np.ndarray, x_min: float, x_max: float) -> dict[str, float]:
+def estimate_i_max_uncertainty(
+    params: np.ndarray,
+    covariance: np.ndarray,
+    x_min: float,
+    x_max: float,
+    n_samples: int = 2000,
+) -> float:
+    covariance = 0.5 * (covariance + covariance.T)
+    try:
+        eigvals, eigvecs = np.linalg.eigh(covariance)
+        eigvals = np.clip(eigvals, 1e-18, None)
+        covariance = eigvecs @ np.diag(eigvals) @ eigvecs.T
+    except np.linalg.LinAlgError:
+        diag = np.clip(np.diag(covariance), 1e-18, None)
+        covariance = np.diag(diag)
+
+    rng = np.random.default_rng(0)
+    try:
+        samples = rng.multivariate_normal(params, covariance, size=n_samples, check_valid="ignore")
+    except np.linalg.LinAlgError:
+        diag = np.clip(np.diag(covariance), 1e-18, None)
+        samples = rng.multivariate_normal(params, np.diag(diag), size=n_samples, check_valid="ignore")
+
+    valides = np.isfinite(samples).all(axis=1) & (samples[:, 3] > 0.0) & (samples[:, 6] > 0.0)
+    if np.count_nonzero(valides) < 30:
+        return float("nan")
+
+    x_dense = np.linspace(float(x_min), float(x_max), 3000)
+    i_max_samples = np.array([np.max(multi_gaussian_2(x_dense, *p)) for p in samples[valides]], dtype=float)
+    if i_max_samples.size < 2:
+        return float("nan")
+    return float(np.std(i_max_samples, ddof=1))
+
+
+def derive_metrics(
+    params: np.ndarray,
+    params_err: np.ndarray,
+    covariance: np.ndarray,
+    x_min: float,
+    x_max: float,
+) -> dict[str, float]:
     a1, mu1, s1 = params[1:4]
     a2, mu2, s2 = params[4:7]
     ea1, emu1, es1 = params_err[1:4]
@@ -207,21 +296,25 @@ def derive_metrics(params: np.ndarray, params_err: np.ndarray, x_min: float, x_m
         sigma_dom = float(s2)
         sigma_dom_err = float(es2)
 
-    fwhm = FWHM_FACTOR * sigma_dom
-    fwhm_err = FWHM_FACTOR * sigma_dom_err
+    largeur_mh = LARGEUR_MH_FACTOR * sigma_dom
+    largeur_mh_err = LARGEUR_MH_FACTOR * sigma_dom_err
 
     x_dense = np.linspace(float(x_min), float(x_max), 3000)
     y_dense = multi_gaussian_2(x_dense, *params)
     i_max = float(np.max(y_dense))
+    i_max_err = estimate_i_max_uncertainty(params, covariance, x_min, x_max)
+    if not np.isfinite(i_max_err) or i_max_err <= 0:
+        i_max_err = max(float(params_err[0]), 1e-9)
     x_i_max = float(x_dense[int(np.argmax(y_dense))])
 
     return {
         "i_max": i_max,
+        "i_max_err": i_max_err,
         "x_i_max": x_i_max,
         "sigma_dom": sigma_dom,
         "sigma_dom_err": sigma_dom_err,
-        "fwhm": fwhm,
-        "fwhm_err": fwhm_err,
+        "largeur_mh": largeur_mh,
+        "largeur_mh_err": largeur_mh_err,
         "a1": float(a1),
         "a1_err": float(ea1),
         "mu1": float(mu1),
@@ -261,7 +354,7 @@ def aggregate_group(files: list[Path]) -> tuple[np.ndarray, np.ndarray, np.ndarr
     y_name_ref = ""
     for path in files:
         x_raw, y_raw, x_name, y_name = load_two_col_csv(path)
-        x, y = crop_curve(x_raw, y_raw)
+        x, y, _ = crop_curve(x_raw, y_raw)
         x_name_ref = x_name
         y_name_ref = y_name
         for xi, yi in zip(x, y):
@@ -280,78 +373,43 @@ def aggregate_group(files: list[Path]) -> tuple[np.ndarray, np.ndarray, np.ndarr
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Agrege les mesures imageur beta depuis Mesures/Imageur_beta/Données brutes "
-            "et produit les courbes agregees + extractions_gaussiennes.csv."
+            "Extrait les parametres des fits gaussiens depuis les courbes agregees "
+            "de type tension-debit.csv et produit extractions_gaussiennes.csv."
         )
     )
-    parser.add_argument("--raw-dir", type=Path, default=Path("Mesures/Imageur_beta/Données brutes"))
-    parser.add_argument("--out-dir", type=Path, default=Path("Mesures/Imageur_beta"))
-    parser.add_argument("--out-csv", type=Path, default=None, help="Chemin de sortie pour extractions_gaussiennes.csv")
+    parser.add_argument("--in-dir", type=Path, default=Path("Mesures/Imageur_beta"))
+    parser.add_argument("--out-csv", type=Path, default=None, help="Chemin de sortie pour extractions_gaussiennes.csv.")
     args = parser.parse_args()
 
-    raw_dir = args.raw_dir
-    out_dir = args.out_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
-    extraction_csv = args.out_csv if args.out_csv is not None else out_dir / "extractions_gaussiennes.csv"
+    in_dir = args.in_dir
+    in_dir.mkdir(parents=True, exist_ok=True)
+    extraction_csv = args.out_csv if args.out_csv is not None else in_dir / "extractions_gaussiennes.csv"
 
-    groups: dict[tuple[float, float], list[tuple[int, Path]]] = defaultdict(list)
-    for p in raw_dir.glob("*.csv"):
+    fichiers_aggreges: list[tuple[float, float, Path]] = []
+    for p in in_dir.glob("*.csv"):
         try:
-            tension, debit, numero = parse_raw_filename(p)
+            tension, debit = parse_aggregated_filename(p)
         except ValueError:
             continue
-        groups[(tension, debit)].append((numero, p))
+        fichiers_aggreges.append((tension, debit, p))
 
-    if not groups:
-        raise SystemExit(f"Aucun fichier brut valide dans {raw_dir}.")
+    if not fichiers_aggreges:
+        raise SystemExit(f"Aucun fichier agrege valide de type tension-debit.csv dans {in_dir}.")
 
     rows_out: list[dict[str, float | int | str]] = []
-    for (tension, debit), items in sorted(groups.items(), key=lambda t: (t[0][1], t[0][0])):
-        items.sort(key=lambda t: t[0])
-        paths = [p for _, p in items]
-
-        x, y_mean, y_std, n_points, x_name, y_name = aggregate_group(paths)
-        agg_path = out_dir / pair_filename(tension, debit)
-        write_aggregated_curve(agg_path, x, y_mean, y_std, n_points, x_name, y_name)
-
-        params, params_err, chi2_red, rmse = fit_curve(x, y_mean, y_std)
-        metrics_fit = derive_metrics(params, params_err, float(np.min(x)), float(np.max(x)))
-
-        i_max_rep: list[float] = []
-        fwhm_rep: list[float] = []
-        for p in paths:
-            xr, yr, _, _ = load_two_col_csv(p)
-            xr, yr = crop_curve(xr, yr)
-            try:
-                pr, er, _, _ = fit_curve(xr, yr, None)
-                mr = derive_metrics(pr, er, float(np.min(xr)), float(np.max(xr)))
-                i_max_rep.append(mr["i_max"])
-                fwhm_rep.append(mr["fwhm"])
-            except Exception:
-                continue
-
-        n_mes = len(paths)
-        i_max_mean = float(np.mean(i_max_rep)) if i_max_rep else metrics_fit["i_max"]
-        fwhm_mean = float(np.mean(fwhm_rep)) if fwhm_rep else metrics_fit["fwhm"]
-        i_max_std = float(np.std(i_max_rep, ddof=1)) if len(i_max_rep) > 1 else 0.0
-        fwhm_std = float(np.std(fwhm_rep, ddof=1)) if len(fwhm_rep) > 1 else 0.0
-        i_max_err_used = i_max_std if i_max_std > 0 else max(rmse, 1e-9)
-        fwhm_err_used = fwhm_std if fwhm_std > 0 else max(metrics_fit["fwhm_err"], 1e-9)
+    for tension, debit, agg_path in sorted(fichiers_aggreges, key=lambda t: (t[1], t[0])):
+        x_raw, y_raw, yerr_raw, _, _ = load_aggregated_curve(agg_path)
+        x, y, yerr = crop_curve(x_raw, y_raw, yerr_raw)
+        params, params_err, covariance, _, _ = fit_curve(x, y, yerr)
+        metrics_fit = derive_metrics(params, params_err, covariance, float(np.min(x)), float(np.max(x)))
 
         rows_out.append(
             {
                 "tension": tension,
                 "debit": debit,
-                "n_mesures": n_mes,
                 "fichier_agrege": agg_path.name,
-                "i_max_mean": i_max_mean,
-                "i_max_std": i_max_std,
-                "i_max_err_utilisee": i_max_err_used,
-                "fwhm_mean": fwhm_mean,
-                "fwhm_std": fwhm_std,
-                "fwhm_err_utilisee": fwhm_err_used,
-                "baseline": metrics_fit["baseline"],
-                "baseline_err": metrics_fit["baseline_err"],
+                "i_max_fit": metrics_fit["i_max"],
+                "i_max_fit_err": metrics_fit["i_max_err"],
                 "a1": metrics_fit["a1"],
                 "a1_err": metrics_fit["a1_err"],
                 "mu1": metrics_fit["mu1"],
@@ -364,28 +422,15 @@ def main() -> None:
                 "mu2_err": metrics_fit["mu2_err"],
                 "sigma2": metrics_fit["sigma2"],
                 "sigma2_err": metrics_fit["sigma2_err"],
-                "sigma_dominante": metrics_fit["sigma_dom"],
-                "sigma_dominante_err": metrics_fit["sigma_dom_err"],
-                "chi2_reduced": chi2_red,
-                "rmse": rmse,
-                "pixel_min": "" if PIXEL_MIN is None else PIXEL_MIN,
-                "pixel_max": "" if PIXEL_MAX is None else PIXEL_MAX,
             }
         )
 
     fields = [
         "tension",
         "debit",
-        "n_mesures",
         "fichier_agrege",
-        "i_max_mean",
-        "i_max_std",
-        "i_max_err_utilisee",
-        "fwhm_mean",
-        "fwhm_std",
-        "fwhm_err_utilisee",
-        "baseline",
-        "baseline_err",
+        "i_max_fit",
+        "i_max_fit_err",
         "a1",
         "a1_err",
         "mu1",
@@ -398,12 +443,6 @@ def main() -> None:
         "mu2_err",
         "sigma2",
         "sigma2_err",
-        "sigma_dominante",
-        "sigma_dominante_err",
-        "chi2_reduced",
-        "rmse",
-        "pixel_min",
-        "pixel_max",
     ]
     with extraction_csv.open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
@@ -412,7 +451,7 @@ def main() -> None:
             w.writerow(row)
 
     print(f"Fichier genere: {extraction_csv}")
-    print(f"Nombre de couples (tension, debit): {len(rows_out)}")
+    print(f"Nombre de courbes agregees traitees: {len(rows_out)}")
 
 
 if __name__ == "__main__":
