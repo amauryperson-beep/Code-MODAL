@@ -13,7 +13,9 @@ from courbes_et_fits import (
     plot_serie_vs_distance,
 )
 
-# Exemple imageur beta: python3 courbes_et_fits.py single Mesures/Imageur_beta/5760-40.csv
+# Exemple imageur beta:
+# python3 traitement_imageur_beta.py
+# python3 courbes_et_fits.py imageur-i-max-vs-tension --debit 40
 
 
 @dataclass(frozen=True)
@@ -574,7 +576,7 @@ def _charger_multi_serie_depuis_csv(path_csv: Path, nom: str) -> JeuDonneesMulti
 
 
 def charger_jeux_donnees() -> tuple[JeuDonneesGrille, JeuDonneesGrille, JeuDonneesSerie, JeuDonneesMultiSerie]:
-    base_dir = Path(__file__).resolve().parent / "mesures" / "Geiger"
+    base_dir = Path(__file__).resolve().parent / "Mesures" / "Geiger"
     jeu_ancien = _charger_grille_depuis_csv(base_dir / "geiger_1_distance.csv", "Geiger 1")
     jeu_nouveau = _charger_grille_depuis_csv(base_dir / "geiger_2_distance.csv", "Geiger 2")
     jeu_attenuation = _charger_serie_depuis_csv(base_dir / "geiger_1_plomb.csv", "Attenuation plomb")

@@ -1,5 +1,7 @@
 COMMANDES POUR AFFICHER LES COURBES
 
+
+
 Geiger (graphes):
 python3 main.py --graphe geiger_1_distance
 python3 main.py --graphe geiger_1_tension
@@ -15,29 +17,33 @@ python3 main.py --fit geiger_2_distance_modele_2
 python3 main.py --fit attenuation_plomb_modele_1
 python3 main.py --fit attenuation_plomb_modele_2
 
-Imageur beta (une courbe + fit double gaussiennes):
-python3 courbes_et_fits.py single Mesures/Imageur_beta/XXXX-YY-Z.csv
-        XXXX = tension, YY = débit, Z = numéro de la mesure
+Geiger (pipeline complet):
+# 1) Donnees brutes dans: Mesures/Geiger/Données brutes
+#    Fichiers attendus:
+#    - geiger_1_grille.csv
+#    - geiger_2_grille.csv
+#    - geiger_1_plomb.csv
+#    - geiger_2_plomb.csv
+# 2) Regenerer les CSV par experience dans Mesures/Geiger
+python3 traitement_geiger.py
 
-Imageur beta (agregation + courbes max/FWHM vs tension et vs debit + fits lineaires):
-python3 courbes_et_fits.py maxima
 
-Fichiers de sortie imageur beta:
-Mesures/Imageur_beta/analyse/extraction_gaussiennes.csv
-Mesures/Imageur_beta/analyse/max_vs_tension_*.png
-Mesures/Imageur_beta/analyse/fwhm_vs_tension_*.png
-Mesures/Imageur_beta/analyse/max_vs_debit_*.png
-Mesures/Imageur_beta/analyse/fwhm_vs_debit_*.png
 
-Affichage des graphes (fenetres):
-- Afficher tous les graphes Geiger:
-python3 main.py --plots all --fits none
+Imageur beta (pipeline complet):
+# 1) Donnees brutes dans: Mesures/Imageur_beta/Données brutes (format: tension-debit-numero.csv)
+# 2) Agrege les courbes en fichiers tension-debit.csv a la racine de Mesures/Imageur_beta
+# 3) Extrait les parametres de fit gaussien dans:
+#    Mesures/Imageur_beta/extractions_gaussiennes.csv
+python3 traitement_imageur_beta.py
 
-- Afficher un graphe Geiger precis (exemple):
-python3 main.py --graphe geiger_2_tension
+Imageur beta (afficher I_max en fonction de la tension, debit=40):
+python3 courbes_et_fits.py imageur-i-max-vs-tension --debit 40
 
-- Afficher une courbe Imageur beta + son fit double gaussiennes (exemple):
-python3 courbes_et_fits.py single Mesures/Imageur_beta/5800-40.csv
+Imageur beta (afficher largeur a mi-hauteur en fonction de la tension, debit=40):
+python3 courbes_et_fits.py imageur-fwhm-vs-tension --debit 40
 
-- Afficher les graphes agreges Imageur beta (max/FWHM vs tension et vs debit):
-python3 courbes_et_fits.py maxima
+Imageur beta (afficher I_max en fonction du debit, tension=6000):
+python3 courbes_et_fits.py imageur-i-max-vs-debit --tension 6000
+
+Imageur beta (afficher largeur a mi-hauteur en fonction du debit, tension=6000):
+python3 courbes_et_fits.py imageur-fwhm-vs-debit --tension 6000
