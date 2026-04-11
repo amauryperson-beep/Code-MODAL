@@ -20,22 +20,13 @@ python3 main.py --fit attenuation_plomb_modele_2
 
 
 Imageur beta (pipeline complet):
-# 1) Les fichiers agregees tension-debit.csv doivent etre presents dans Mesures/Imageur_beta
-# 2) Extrait les parametres de fit gaussien (I_max, incertitude sur I_max, gaussiennes) dans:
-#    Mesures/Imageur_beta/extractions_gaussiennes.csv
 python3 traitement_imageur_beta.py
 
-Imageur beta (afficher I_max en fonction de la tension, debit=40):
-python3 courbes_et_fits.py imageur-i-max-vs-tension --debit 40
+python3 courbes_et_fits.py single Mesures/Imageur_beta/5800-45.csv
 
-Imageur beta (afficher largeur_mh en fonction de la tension, debit=40):
-python3 courbes_et_fits.py imageur-largeur-mh-vs-tension --debit 40
-
-Imageur beta (afficher I_max en fonction du debit, tension=6000):
+python3 courbes_et_fits.py imageur-i-max-vs-tension --debit 60
 python3 courbes_et_fits.py imageur-i-max-vs-debit --tension 6000
 
-Imageur beta (afficher largeur_mh en fonction du debit, tension=6000):
-python3 courbes_et_fits.py imageur-largeur-mh-vs-debit --tension 6000
-
-Imageur beta (afficher metrique_1..4 en fonction de la tension, debit=40, a=0.5):
-python3 courbes_et_fits.py imageur-metriques-vs-tension --debit 40 --a 0.5
+python3 courbes_et_fits.py imageur-metrique-vs-tension --debit 60 --metrique 1
+python3 courbes_et_fits.py imageur-metrique-vs-tension --debit 40 --metrique 3 --a 0.7
+python3 courbes_et_fits.py imageur-metrique-vs-debit --tension 5800 --metrique 4 --a 0.3

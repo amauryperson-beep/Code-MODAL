@@ -349,32 +349,75 @@ def write_aggregated_curve(
 
 
 def aggregate_group(files: list[Path]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str, str]:
-    values_by_x: dict[float, list[float]] = defaultdict(list)
+    """Agrege les courbes en alignant par le centre de la gaussienne (mu arrondi)."""
+    # Étape 1: Fitter chaque courbe et extraire mu arrondi (pixel central)
+    alignments: list[dict] = []
     x_name_ref = ""
     y_name_ref = ""
+    
     for path in files:
         x_raw, y_raw, x_name, y_name = load_two_col_csv(path)
         x, y, _ = crop_curve(x_raw, y_raw)
         x_name_ref = x_name
         y_name_ref = y_name
+        
+        # Fitter la courbe pour obtenir le centre (mu)
+        try:
+            params, _, _, _, _ = fit_curve(x, y, None)
+            mu = params[2]  # mu1 de la première gaussienne
+            mu_rounded = int(round(mu))
+        except Exception:
+            # Si le fit échoue, utiliser la médiane
+            mu_rounded = int(round(np.median(x)))
+        
+        alignments.append({
+            'x': x,
+            'y': y,
+            'mu_rounded': mu_rounded,
+        })
+    
+    # Étape 2: Trouver la plage d'intersection (où TOUS les fichiers ont des données)
+    dx_mins = []
+    dx_maxs = []
+    for alignment in alignments:
+        x = alignment['x']
+        mu_rounded = alignment['mu_rounded']
+        dx_min = float(np.min(x)) - mu_rounded
+        dx_max = float(np.max(x)) - mu_rounded
+        dx_mins.append(dx_min)
+        dx_maxs.append(dx_max)
+    
+    dx_min_intersection = max(dx_mins)
+    dx_max_intersection = min(dx_maxs)
+    
+    # Étape 3: Agréger autour du pixel central dans la plage d'intersection
+    values_by_dx: dict[float, list[float]] = defaultdict(list)
+    
+    for alignment in alignments:
+        x = alignment['x']
+        y = alignment['y']
+        mu_rounded = alignment['mu_rounded']
+        
         for xi, yi in zip(x, y):
-            values_by_x[float(xi)].append(float(yi))
-
-    x_sorted = np.array(sorted(values_by_x.keys()), dtype=float)
-    y_mean = np.array([np.mean(values_by_x[x]) for x in x_sorted], dtype=float)
+            dx = float(xi) - mu_rounded
+            if dx_min_intersection <= dx <= dx_max_intersection:
+                values_by_dx[float(dx)].append(float(yi))
+    
+    x_sorted = np.array(sorted(values_by_dx.keys()), dtype=float)
+    y_mean = np.array([np.mean(values_by_dx[x]) for x in x_sorted], dtype=float)
     y_std = np.array(
-        [np.std(values_by_x[x], ddof=1) if len(values_by_x[x]) > 1 else 0.0 for x in x_sorted],
+        [np.std(values_by_dx[x], ddof=1) if len(values_by_dx[x]) > 1 else 0.0 for x in x_sorted],
         dtype=float,
     )
-    n_points = np.array([len(values_by_x[x]) for x in x_sorted], dtype=int)
+    n_points = np.array([len(values_by_dx[x]) for x in x_sorted], dtype=int)
     return x_sorted, y_mean, y_std, n_points, x_name_ref, y_name_ref
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Extrait les parametres des fits gaussiens depuis les courbes agregees "
-            "de type tension-debit.csv et produit extractions_gaussiennes.csv."
+            "Agrege les fichiers bruts tension-debit-numero.csv en fichiers tension-debit.csv, "
+            "puis extrait les parametres des fits gaussiens et produit extractions_gaussiennes.csv."
         )
     )
     parser.add_argument("--in-dir", type=Path, default=Path("Mesures/Imageur_beta"))
@@ -383,8 +426,36 @@ def main() -> None:
 
     in_dir = args.in_dir
     in_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir = in_dir / "Données brutes"
     extraction_csv = args.out_csv if args.out_csv is not None else in_dir / "extractions_gaussiennes.csv"
 
+    # Etape 1: Agreguer les fichiers bruts (tension-debit-numero.csv) en fichiers aggreges (tension-debit.csv)
+    fichiers_bruts: dict[tuple[float, float], list[Path]] = {}
+    if raw_dir.exists():
+        for p in raw_dir.glob("*.csv"):
+            try:
+                tension, debit, _ = parse_raw_filename(p)
+            except ValueError:
+                continue
+            key = (tension, debit)
+            if key not in fichiers_bruts:
+                fichiers_bruts[key] = []
+            fichiers_bruts[key].append(p)
+
+        if fichiers_bruts:
+            print(f"Agrégation des fichiers bruts depuis {raw_dir}...")
+            for (tension, debit), fichiers_groupe in sorted(fichiers_bruts.items()):
+                agg_filename = pair_filename(tension, debit)
+                agg_path = in_dir / agg_filename
+                print(f"  Agrégation de {len(fichiers_groupe)} fichier(s) pour (T={tension:g}, D={debit:g}) -> {agg_filename}")
+                
+                x_agg, y_agg, y_std_agg, n_points_agg, x_name, y_name = aggregate_group(fichiers_groupe)
+                write_aggregated_curve(agg_path, x_agg, y_agg, y_std_agg, n_points_agg, x_name, y_name)
+            print(f"Agrégation terminée: {len(fichiers_bruts)} fichier(s) agrégé(s).\n")
+    else:
+        print(f"Avertissement: le dossier {raw_dir} n'existe pas ou aucun fichier brut trouvé.")
+
+    # Etape 2: Charger les fichiers aggreges pour extraire les metriques
     fichiers_aggreges: list[tuple[float, float, Path]] = []
     for p in in_dir.glob("*.csv"):
         try:
