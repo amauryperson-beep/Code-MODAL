@@ -7,7 +7,8 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-from scipy.optimize import curve_fit
+from scipy.integrate import quad, trapezoid
+from scipy.optimize import curve_fit, brentq
 from scipy.signal import find_peaks
 
 
@@ -277,6 +278,85 @@ def estimate_i_max_uncertainty(
     return float(np.std(i_max_samples, ddof=1))
 
 
+def calculate_sigma_eff(
+    params: np.ndarray,
+    x_min: float,
+    x_max: float,
+) -> tuple[float, float, float]:
+    """Calcule le sigma efficace basé sur la couverture symétrique de 63% de l'énergie.
+    
+    Définition: Trouve x1 et x2 tels que:
+    - CDF(x1) = (1 - 0.63) / 2 = 0.185 (queue gauche)
+    - CDF(x2) = 1 - (1 - 0.63) / 2 = 0.815 (queue droite)
+    - sigma_eff = (x2 - x1) / 2
+    
+    Cela couvre les 63% centraux de la distribution (excluant 18.5% de chaque côté).
+    
+    Returns:
+        (sigma_eff, x1, x2)
+    """
+    baseline, a1, mu1, s1, a2, mu2, s2 = params
+    
+    # Estimer les limites de recherche
+    mu_min = min(mu1, mu2)
+    mu_max = max(mu1, mu2)
+    sigma_max = max(s1, s2)
+    
+    x_search_min = mu_min - 6 * sigma_max
+    x_search_max = mu_max + 6 * sigma_max
+    
+    # Créer une grille fine pour la CDF
+    x_grid = np.linspace(x_search_min, x_search_max, 1500)
+    y_grid = multi_gaussian_2(x_grid, *params)
+    
+    # Calculer la CDF par intégration numérique
+    cdf_vals = np.zeros_like(x_grid)
+    for i in range(len(x_grid)):
+        cdf_vals[i] = trapezoid(y_grid[:i+1], x_grid[:i+1])
+    
+    # Normaliser la CDF
+    cdf_total = cdf_vals[-1]
+    if cdf_total <= 0 or not np.isfinite(cdf_total):
+        return float("nan"), float("nan"), float("nan")
+    
+    cdf_normalized = cdf_vals / cdf_total
+    
+    # Quantiles pour 63% de couverture centrée
+    target_low = 0.185  # (1 - 0.63) / 2
+    target_high = 0.815  # 1 - 0.185
+    
+    # Trouver x1: CDF(x1) = 0.185
+    try:
+        idx_x1 = np.argmin(np.abs(cdf_normalized - target_low))
+        if idx_x1 > 0 and idx_x1 < len(x_grid) - 1:
+            # Interpoler pour plus de précision
+            x1 = np.interp(target_low, cdf_normalized[max(0, idx_x1-5):idx_x1+5], 
+                           x_grid[max(0, idx_x1-5):idx_x1+5])
+        else:
+            x1 = x_grid[idx_x1]
+    except:
+        return float("nan"), float("nan"), float("nan")
+    
+    # Trouver x2: CDF(x2) = 0.815
+    try:
+        idx_x2 = np.argmin(np.abs(cdf_normalized - target_high))
+        if idx_x2 > 0 and idx_x2 < len(x_grid) - 1:
+            # Interpoler pour plus de précision
+            x2 = np.interp(target_high, cdf_normalized[max(0, idx_x2-5):idx_x2+5], 
+                           x_grid[max(0, idx_x2-5):idx_x2+5])
+        else:
+            x2 = x_grid[idx_x2]
+    except:
+        return float("nan"), float("nan"), float("nan")
+    
+    # Vérifier la sanité des résultats
+    if not (np.isfinite(x1) and np.isfinite(x2)) or (x2 - x1) <= 0:
+        return float("nan"), float("nan"), float("nan")
+    
+    sigma_eff = (x2 - x1) / 2.0
+    return float(sigma_eff), float(x1), float(x2)
+
+
 def derive_metrics(
     params: np.ndarray,
     params_err: np.ndarray,
@@ -306,6 +386,9 @@ def derive_metrics(
     if not np.isfinite(i_max_err) or i_max_err <= 0:
         i_max_err = max(float(params_err[0]), 1e-9)
     x_i_max = float(x_dense[int(np.argmax(y_dense))])
+    
+    # Calculer sigma efficace
+    sigma_eff, x1, x2 = calculate_sigma_eff(params, x_min, x_max)
 
     return {
         "i_max": i_max,
@@ -315,6 +398,7 @@ def derive_metrics(
         "sigma_dom_err": sigma_dom_err,
         "largeur_mh": largeur_mh,
         "largeur_mh_err": largeur_mh_err,
+        "sigma_eff": sigma_eff,
         "a1": float(a1),
         "a1_err": float(ea1),
         "mu1": float(mu1),
@@ -348,76 +432,71 @@ def write_aggregated_curve(
             w.writerow([f"{xi:.12g}", f"{yi:.12g}", f"{si:.12g}", int(ni)])
 
 
-def aggregate_group(files: list[Path]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str, str]:
-    """Agrege les courbes en alignant par le centre de la gaussienne (mu arrondi)."""
-    # Étape 1: Fitter chaque courbe et extraire mu arrondi (pixel central)
-    alignments: list[dict] = []
-    x_name_ref = ""
-    y_name_ref = ""
+def aggregate_parameters(
+    fits_data: list[dict],
+) -> dict[str, float]:
+    """Agrege les paramètres de plusieurs fits en calculant moyenne et écart-type.
     
-    for path in files:
-        x_raw, y_raw, x_name, y_name = load_two_col_csv(path)
-        x, y, _ = crop_curve(x_raw, y_raw)
-        x_name_ref = x_name
-        y_name_ref = y_name
-        
-        # Fitter la courbe pour obtenir le centre (mu)
-        try:
-            params, _, _, _, _ = fit_curve(x, y, None)
-            mu = params[2]  # mu1 de la première gaussienne
-            mu_rounded = int(round(mu))
-        except Exception:
-            # Si le fit échoue, utiliser la médiane
-            mu_rounded = int(round(np.median(x)))
-        
-        alignments.append({
-            'x': x,
-            'y': y,
-            'mu_rounded': mu_rounded,
-        })
+    Args:
+        fits_data: Liste de dicts contenant les clés: "params", "params_err", "covariance",
+                   "x_min", "x_max"
     
-    # Étape 2: Trouver la plage d'intersection (où TOUS les fichiers ont des données)
-    dx_mins = []
-    dx_maxs = []
-    for alignment in alignments:
-        x = alignment['x']
-        mu_rounded = alignment['mu_rounded']
-        dx_min = float(np.min(x)) - mu_rounded
-        dx_max = float(np.max(x)) - mu_rounded
-        dx_mins.append(dx_min)
-        dx_maxs.append(dx_max)
+    Returns:
+        Dict avec moyenne et écart-type de chaque paramètre
+    """
+    if not fits_data:
+        raise ValueError("Pas de données de fit à agréger")
     
-    dx_min_intersection = max(dx_mins)
-    dx_max_intersection = min(dx_maxs)
+    n_fits = len(fits_data)
     
-    # Étape 3: Agréger autour du pixel central dans la plage d'intersection
-    values_by_dx: dict[float, list[float]] = defaultdict(list)
+    # Calculer metrics pour chaque fit
+    metrics_list = []
+    for fit in fits_data:
+        metrics = derive_metrics(
+            fit["params"],
+            fit["params_err"],
+            fit["covariance"],
+            fit["x_min"],
+            fit["x_max"],
+        )
+        metrics_list.append(metrics)
     
-    for alignment in alignments:
-        x = alignment['x']
-        y = alignment['y']
-        mu_rounded = alignment['mu_rounded']
-        
-        for xi, yi in zip(x, y):
-            dx = float(xi) - mu_rounded
-            if dx_min_intersection <= dx <= dx_max_intersection:
-                values_by_dx[float(dx)].append(float(yi))
+    # Agréger: moyenne et écart-type de chaque paramètre et métrique
+    aggregation_params = [
+        "baseline",
+        "a1",
+        "mu1",
+        "sigma1",
+        "a2",
+        "mu2",
+        "sigma2",
+        "i_max",
+        "x_i_max",
+        "sigma_dom",
+        "largeur_mh",
+        "sigma_eff",
+    ]
     
-    x_sorted = np.array(sorted(values_by_dx.keys()), dtype=float)
-    y_mean = np.array([np.mean(values_by_dx[x]) for x in x_sorted], dtype=float)
-    y_std = np.array(
-        [np.std(values_by_dx[x], ddof=1) if len(values_by_dx[x]) > 1 else 0.0 for x in x_sorted],
-        dtype=float,
-    )
-    n_points = np.array([len(values_by_dx[x]) for x in x_sorted], dtype=int)
-    return x_sorted, y_mean, y_std, n_points, x_name_ref, y_name_ref
+    result = {}
+    
+    # Pour chaque paramètre/métrique, calculer moyenne et écart-type
+    for param_name in aggregation_params:
+        values = np.array([metrics[param_name] for metrics in metrics_list], dtype=float)
+        result[f"{param_name}_mean"] = float(np.nanmean(values))
+        if n_fits > 1:
+            result[f"{param_name}_std"] = float(np.nanstd(values, ddof=1))
+        else:
+            result[f"{param_name}_std"] = 0.0
+
+    return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Agrege les fichiers bruts tension-debit-numero.csv en fichiers tension-debit.csv, "
-            "puis extrait les parametres des fits gaussiens et produit extractions_gaussiennes.csv."
+            "Extrait les paramètres des fits gaussiens de chaque fichier brut (tension-debit-numero.csv), "
+            "puis calcule moyenne et écart-type pour chaque couple (tension-debit). "
+            "Produit extractions_gaussiennes.csv."
         )
     )
     parser.add_argument("--in-dir", type=Path, default=Path("Mesures/Imageur_beta"))
@@ -429,100 +508,117 @@ def main() -> None:
     raw_dir = in_dir / "Données brutes"
     extraction_csv = args.out_csv if args.out_csv is not None else in_dir / "extractions_gaussiennes.csv"
 
-    # Etape 1: Agreguer les fichiers bruts (tension-debit-numero.csv) en fichiers aggreges (tension-debit.csv)
+    # Étape 1: Charger tous les fichiers bruts (tension-debit-numero.csv) et les fitter
     fichiers_bruts: dict[tuple[float, float], list[Path]] = {}
-    if raw_dir.exists():
-        for p in raw_dir.glob("*.csv"):
-            try:
-                tension, debit, _ = parse_raw_filename(p)
-            except ValueError:
-                continue
-            key = (tension, debit)
-            if key not in fichiers_bruts:
-                fichiers_bruts[key] = []
-            fichiers_bruts[key].append(p)
-
-        if fichiers_bruts:
-            print(f"Agrégation des fichiers bruts depuis {raw_dir}...")
-            for (tension, debit), fichiers_groupe in sorted(fichiers_bruts.items()):
-                agg_filename = pair_filename(tension, debit)
-                agg_path = in_dir / agg_filename
-                print(f"  Agrégation de {len(fichiers_groupe)} fichier(s) pour (T={tension:g}, D={debit:g}) -> {agg_filename}")
-                
-                x_agg, y_agg, y_std_agg, n_points_agg, x_name, y_name = aggregate_group(fichiers_groupe)
-                write_aggregated_curve(agg_path, x_agg, y_agg, y_std_agg, n_points_agg, x_name, y_name)
-            print(f"Agrégation terminée: {len(fichiers_bruts)} fichier(s) agrégé(s).\n")
-    else:
-        print(f"Avertissement: le dossier {raw_dir} n'existe pas ou aucun fichier brut trouvé.")
-
-    # Etape 2: Charger les fichiers aggreges pour extraire les metriques
-    fichiers_aggreges: list[tuple[float, float, Path]] = []
-    for p in in_dir.glob("*.csv"):
+    if not raw_dir.exists():
+        raise SystemExit(f"Le dossier {raw_dir} n'existe pas.")
+    
+    for p in raw_dir.glob("*.csv"):
         try:
-            tension, debit = parse_aggregated_filename(p)
+            tension, debit, _ = parse_raw_filename(p)
         except ValueError:
             continue
-        fichiers_aggreges.append((tension, debit, p))
+        key = (tension, debit)
+        if key not in fichiers_bruts:
+            fichiers_bruts[key] = []
+        fichiers_bruts[key].append(p)
 
-    if not fichiers_aggreges:
-        raise SystemExit(f"Aucun fichier agrege valide de type tension-debit.csv dans {in_dir}.")
+    if not fichiers_bruts:
+        raise SystemExit(f"Aucun fichier brut de type tension-debit-numero.csv trouvé dans {raw_dir}.")
 
+    # Étape 2: Fitter chaque fichier brut et agréger les paramètres par couple (tension, debit)
+    print(f"Traitement de {sum(len(files) for files in fichiers_bruts.values())} fichier(s) brut(s) regroupés en {len(fichiers_bruts)} couple(s)...\n")
+    
     rows_out: list[dict[str, float | int | str]] = []
-    for tension, debit, agg_path in sorted(fichiers_aggreges, key=lambda t: (t[1], t[0])):
-        x_raw, y_raw, yerr_raw, _, _ = load_aggregated_curve(agg_path)
-        x, y, yerr = crop_curve(x_raw, y_raw, yerr_raw)
-        params, params_err, covariance, _, _ = fit_curve(x, y, yerr)
-        metrics_fit = derive_metrics(params, params_err, covariance, float(np.min(x)), float(np.max(x)))
+    
+    for (tension, debit), fichiers_groupe in sorted(fichiers_bruts.items()):
+        print(f"Traitement (T={tension:g}, D={debit:g}): {len(fichiers_groupe)} fichier(s)")
+        
+        fits_data = []
+        
+        # Fitter chaque fichier brut du groupe
+        for fichier_path in sorted(fichiers_groupe):
+            try:
+                x_raw, y_raw, x_name, y_name = load_two_col_csv(fichier_path)
+                x, y, _ = crop_curve(x_raw, y_raw)
+                params, params_err, covariance, chi2_red, rmse = fit_curve(x, y, None)
+                
+                fits_data.append({
+                    "fichier": fichier_path.name,
+                    "params": params,
+                    "params_err": params_err,
+                    "covariance": covariance,
+                    "x_min": float(np.min(x)),
+                    "x_max": float(np.max(x)),
+                    "chi2_red": chi2_red,
+                    "rmse": rmse,
+                })
+            except Exception as e:
+                print(f"    ⚠ Erreur lors du fit de {fichier_path.name}: {e}")
+                continue
+        
+        if not fits_data:
+            print(f"    ✗ Aucun fit valide pour ce couple. Skipping.")
+            continue
+        
+        # Agréger les paramètres
+        aggregated = aggregate_parameters(fits_data)
+        
+        # Ajouter les informations du couple et les statistiques des fits
+        row = {
+            "tension": tension,
+            "debit": debit,
+            "n_fichiers": len(fits_data),
+        }
+        row.update(aggregated)
+        rows_out.append(row)
+        
+        print(f"    ✓ {len(fits_data)} fichier(s) traité(s) avec succès")
 
-        rows_out.append(
-            {
-                "tension": tension,
-                "debit": debit,
-                "fichier_agrege": agg_path.name,
-                "i_max_fit": metrics_fit["i_max"],
-                "i_max_fit_err": metrics_fit["i_max_err"],
-                "a1": metrics_fit["a1"],
-                "a1_err": metrics_fit["a1_err"],
-                "mu1": metrics_fit["mu1"],
-                "mu1_err": metrics_fit["mu1_err"],
-                "sigma1": metrics_fit["sigma1"],
-                "sigma1_err": metrics_fit["sigma1_err"],
-                "a2": metrics_fit["a2"],
-                "a2_err": metrics_fit["a2_err"],
-                "mu2": metrics_fit["mu2"],
-                "mu2_err": metrics_fit["mu2_err"],
-                "sigma2": metrics_fit["sigma2"],
-                "sigma2_err": metrics_fit["sigma2_err"],
-            }
-        )
-
-    fields = [
+    # Étape 3: Écrire les résultats
+    if not rows_out:
+        raise SystemExit("Aucun couple (tension, debit) avec des fits valides.")
+    
+    # Colonnes fixes: éviter d'exporter des champs intermédiaires inutiles.
+    ordered_cols = [
         "tension",
         "debit",
-        "fichier_agrege",
-        "i_max_fit",
-        "i_max_fit_err",
-        "a1",
-        "a1_err",
-        "mu1",
-        "mu1_err",
-        "sigma1",
-        "sigma1_err",
-        "a2",
-        "a2_err",
-        "mu2",
-        "mu2_err",
-        "sigma2",
-        "sigma2_err",
+        "n_fichiers",
+        "baseline_mean",
+        "baseline_std",
+        "a1_mean",
+        "a1_std",
+        "mu1_mean",
+        "mu1_std",
+        "sigma1_mean",
+        "sigma1_std",
+        "a2_mean",
+        "a2_std",
+        "mu2_mean",
+        "mu2_std",
+        "sigma2_mean",
+        "sigma2_std",
+        "i_max_mean",
+        "i_max_std",
+        "x_i_max_mean",
+        "x_i_max_std",
+        "sigma_dom_mean",
+        "sigma_dom_std",
+        "largeur_mh_mean",
+        "largeur_mh_std",
+        "sigma_eff_mean",
+        "sigma_eff_std",
     ]
+    
     with extraction_csv.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
+        w = csv.DictWriter(f, fieldnames=ordered_cols, extrasaction="ignore")
         w.writeheader()
         for row in rows_out:
             w.writerow(row)
 
-    print(f"Fichier genere: {extraction_csv}")
-    print(f"Nombre de courbes agregees traitees: {len(rows_out)}")
+    print(f"\n✓ Fichier généré: {extraction_csv}")
+    print(f"  Nombre de couples (tension, debit) traités: {len(rows_out)}")
+
 
 
 if __name__ == "__main__":

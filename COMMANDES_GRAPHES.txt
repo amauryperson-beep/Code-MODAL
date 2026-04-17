@@ -1,0 +1,123 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║             COMMANDES POUR AFFICHER LES GRAPHES                            ║
+║              Analyse des Paramètres Gaussiens                              ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+
+🚀 COMMANDES PRINCIPALES
+═══════════════════════════════════════════════════════════════════════════════
+
+1. PIPELINE COMPLET (RECOMMANDÉ)
+   ─────────────────────────────────
+   python3 pipeline_complet.py --graphs-dir Graphes/Imageur_beta
+   
+   → Exécute tout: extraction + génération des graphes
+   → Sauvegarde 3 fichiers PNG dans Graphes/Imageur_beta/
+
+
+2. GÉNÉRER LES GRAPHES UNIQUEMENT
+   ───────────────────────────────────
+   
+   a) Tous les graphes:
+      python3 generer_graphes.py --out-dir Graphes/Imageur_beta
+   
+   b) Heatmaps seulement:
+      python3 generer_graphes.py --out-dir Graphes/Imageur_beta --plot-type heatmap
+   
+   c) Courbes vs tension seulement:
+      python3 generer_graphes.py --out-dir Graphes/Imageur_beta --plot-type vs_tension
+   
+   d) Courbes vs débit seulement:
+      python3 generer_graphes.py --out-dir Graphes/Imageur_beta --plot-type vs_debit
+   
+   e) Affichage à l'écran (sans sauvegarder):
+      python3 generer_graphes.py
+
+
+3. EXPLORER DES PARAMÈTRES SPÉCIFIQUES
+   ──────────────────────────────────────
+   
+   a) Lister les paramètres disponibles:
+      python3 tracer_parametres.py --list
+   
+   b) Un paramètre vs tension (tous débits):
+      python3 tracer_parametres.py --param a1 --vs tension
+   
+   c) Un paramètre vs tension (débit spécifique):
+      python3 tracer_parametres.py --param mu1 --vs tension --debit 40
+
+   c2) Un paramètre vs tension (TOUS les débits sur la même courbe, avec fits):
+      python3 tracer_parametres.py --param sigma_eff --vs tension --debit all
+   
+   d) Un paramètre vs débit (tension spécifique):
+      python3 tracer_parametres.py --param sigma1 --vs debit --tension 5800
+
+   d2) Un paramètre vs débit (TOUTES les tensions sur la même courbe, avec fits):
+      python3 tracer_parametres.py --param sigma_eff --vs debit --tension all
+   
+   ℹ️ REMARQUE: Vous pouvez utiliser "a1" ou "a1_mean", les deux marchent!
+
+═════════════════════════════════════════════════════════════════════════════════
+📈 PARAMÈTRES POPULAIRES À TRACER
+═════════════════════════════════════════════════════════════════════════════════
+
+Amplitudes des gaussiennes:
+  python3 tracer_parametres.py --param a1 --vs tension
+  python3 tracer_parametres.py --param a2 --vs tension
+
+Positions des pics:
+  python3 tracer_parametres.py --param mu1 --vs tension --debit 40
+  python3 tracer_parametres.py --param mu2 --vs tension
+
+Largeurs des pics:
+  python3 tracer_parametres.py --param sigma1 --vs tension
+  python3 tracer_parametres.py --param sigma2 --vs tension --debit 40
+
+Intensité maximale:
+  python3 tracer_parametres.py --param i_max --vs tension
+  python3 tracer_parametres.py --param i_max --vs debit --tension 5800
+
+Largeur à mi-hauteur:
+  python3 tracer_parametres.py --param largeur_mh --vs tension
+
+Largeur dominante:
+  python3 tracer_parametres.py --param sigma_dom --vs tension
+
+Sigma effectif:
+  python3 tracer_parametres.py --param sigma_eff --vs tension --debit all
+  python3 tracer_parametres.py --param sigma_eff --vs debit --tension all
+
+═════════════════════════════════════════════════════════════════════════════════
+💡 FLUX DE TRAVAIL RECOMMANDÉ
+═════════════════════════════════════════════════════════════════════════════════
+
+1. Générer tous les graphes (première fois):
+   python3 pipeline_complet.py --graphs-dir Graphes/Imageur_beta
+
+2. Ouvrir et examiner les 3 graphes PNG
+
+3. Explorez un paramètre qui vous intéresse:
+   python3 tracer_parametres.py --param [nom_parametre] --vs tension
+
+4. Regénérez si besoin:
+   python3 generer_graphes.py --out-dir Graphes/Imageur_beta --plot-type heatmap
+
+
+═════════════════════════════════════════════════════════════════════════════════
+❓ PARAMÈTRES DISPONIBLES
+═════════════════════════════════════════════════════════════════════════════════
+
+Pour voir la liste complète:
+  python3 tracer_parametres.py --list
+
+Paramètres communs:
+  • a1_mean, a2_mean         (Amplitudes)
+  • mu1_mean, mu2_mean       (Positions)
+  • sigma1_mean, sigma2_mean (Largeurs)
+  • baseline_mean            (Ligne de base)
+  • i_max_mean               (Intensité maximale)
+  • x_i_max_mean             (Position intensité max)
+  • sigma_dom_mean           (Largeur dominante)
+  • largeur_mh_mean          (Largeur à mi-hauteur)
+
++ Versions _std pour les écarts-types
