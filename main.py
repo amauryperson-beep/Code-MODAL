@@ -1,619 +1,667 @@
-import argparse
-import csv
-import numpy as np
-import matplotlib.pyplot as plt
-from dataclasses import dataclass
-from pathlib import Path
-from scipy.optimize import curve_fit
-from courbes_et_fits import (
-    plot_courbe_ajustee,
-    plot_grille_vs_distance,
-    plot_grille_vs_tension,
-    plot_multi_serie_vs_distance,
-    plot_serie_vs_distance,
-)
+"""
+main.py – Visualisation Pygame de l'avalanche de Townsend
+Commandes :
+  ESPACE      Lecture / Pause
+  ← →         Reculer / Avancer d'un pas
+  R           Relancer une nouvelle simulation
+  +  -        Tension ±100 V  (relance)
+  [  ]        Temps de recombinaison ±10 pas
+  H           Afficher / fermer l'histogramme
+  E           Exporter données (CSV + PNG)
+  Q / ESC     Quitter
+"""
 
-# Exemple imageur beta:
-# python3 traitement_imageur_beta.py
-# python3 courbes_et_fits.py imageur-i-max-vs-tension --debit 40
+import sys, math, time, random, os, csv
+import pygame
+import pygame.gfxdraw
+from physics import AvalancheSimulation
 
+# ── Palette ──────────────────────────────────────────────────────────────────
+BG           = (8,   10,  20)
+ANODE_COL    = (255,  80,  80)
+CATHODE_COL  = (80,  160, 255)
+ATOM_NEUT    = (60,   80, 100)
+ATOM_ION     = (255, 160,  30)
+ATOM_EXC     = (180, 100, 255)
+ATOM_RECOMB  = (60,  210, 130)   # recombination flash: green
+ELECTRON_C   = (100, 220, 255)
+ION_C        = (255, 130,  30)
+TRAIL_E      = (40,  120, 180)
+TRAIL_I      = (150,  70,  10)
+TEXT_COL     = (200, 210, 230)
+PANEL_COL    = (15,   20,  35)
+SLIDER_BG    = (35,   45,  65)
+SLIDER_FG    = (80,  160, 255)
+IONISE_FLASH = (255, 220,  60)
+HIST_BAR     = (80,  160, 255)
+HIST_BG      = (12,   16,  28)
+HIST_GRID    = (30,   40,  60)
+EXPORT_OK    = (60,  210, 130)
 
-@dataclass(frozen=True)
-class JeuDonneesGrille:
-    """Mesures indexees par distance et tension."""
+# ── Dimensions ───────────────────────────────────────────────────────────────
+WIN_W, WIN_H = int(960*1.1), int(700*1.1)
+SIM_W, SIM_H = int(660*1.1), int(520*1.1)
+SIM_X, SIM_Y = int(1.1*20),  int(1.1*80)
+PANEL_X      = SIM_X + SIM_W + 20
+PANEL_W      = WIN_W - PANEL_X - 10
+SLIDER_H     = 28
+SLIDER_Y     = WIN_H - 50
+SLIDER_X     = SIM_X
+SLIDER_W     = SIM_W
 
-    nom: str
-    distances: np.ndarray
-    tensions: np.ndarray
-    mesures_brutes: np.ndarray  # shape: (n_distances, n_tensions, n_repetitions)
+# Recombination-time slider (bottom-right panel area)
+RECOMB_SLIDER_X = PANEL_X + 8
+RECOMB_SLIDER_W = PANEL_W - 16
 
-    def __post_init__(self):
-        object.__setattr__(self, "distances", np.asarray(self.distances, dtype=float))
-        object.__setattr__(self, "tensions", np.asarray(self.tensions, dtype=float))
-        object.__setattr__(self, "mesures_brutes", np.asarray(self.mesures_brutes, dtype=float))
+N_STEPS = 400
+N_ATOMS = 160*9
+FPS     = 50
 
-        forme_attendue = (len(self.distances), len(self.tensions))
-        if self.mesures_brutes.ndim != 3 or self.mesures_brutes.shape[:2] != forme_attendue:
-            raise ValueError(
-                f"{self.nom}: mesures_brutes doit avoir la forme "
-                f"(n_distances, n_tensions, n_repetitions). "
-                f"Attendu {forme_attendue}, obtenu {self.mesures_brutes.shape}."
-            )
+# Histogram window
+HIST_W, HIST_H   = int(700*1.1), int(420*1.1)
+HIST_BINS        = 28
+HIST_MARGIN      = 60    # px around the chart area
 
-    @property
-    def moyenne(self) -> np.ndarray:
-        return np.mean(self.mesures_brutes, axis=2)
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
-    @property
-    def ecart_type(self) -> np.ndarray:
-        return np.std(self.mesures_brutes, axis=2)
-
-
-@dataclass(frozen=True)
-class JeuDonneesSerie:
-    """Mesures indexees uniquement par distance."""
-
-    nom: str
-    distances: np.ndarray
-    mesures_brutes: np.ndarray  # shape: (n_distances, n_repetitions)
-
-    def __post_init__(self):
-        object.__setattr__(self, "distances", np.asarray(self.distances, dtype=float))
-        object.__setattr__(self, "mesures_brutes", np.asarray(self.mesures_brutes, dtype=float))
-
-        if self.mesures_brutes.ndim != 2 or self.mesures_brutes.shape[0] != len(self.distances):
-            raise ValueError(
-                f"{self.nom}: mesures_brutes doit avoir la forme (n_distances, n_repetitions). "
-                f"Attendu {len(self.distances)}, obtenu {self.mesures_brutes.shape}."
-            )
-
-    @property
-    def moyenne(self) -> np.ndarray:
-        return np.mean(self.mesures_brutes, axis=1)
-
-    @property
-    def ecart_type(self) -> np.ndarray:
-        return np.std(self.mesures_brutes, axis=1)
+def draw_rrect(surf, color, rect, r=6, alpha=255):
+    if alpha < 255:
+        s = pygame.Surface((rect[2], rect[3]), pygame.SRCALPHA)
+        pygame.draw.rect(s, (*color, alpha), (0, 0, rect[2], rect[3]), border_radius=r)
+        surf.blit(s, (rect[0], rect[1]))
+    else:
+        pygame.draw.rect(surf, color, rect, border_radius=r)
 
 
-@dataclass(frozen=True)
-class JeuDonneesMultiSerie:
-    """Mesures indexees par categorie (ex: nombre de plaques) et distance."""
-
-    nom: str
-    categories: np.ndarray
-    distances: np.ndarray
-    mesures_brutes: np.ndarray  # shape: (n_categories, n_distances, n_repetitions)
-
-    def __post_init__(self):
-        object.__setattr__(self, "categories", np.asarray(self.categories, dtype=float))
-        object.__setattr__(self, "distances", np.asarray(self.distances, dtype=float))
-        object.__setattr__(self, "mesures_brutes", np.asarray(self.mesures_brutes, dtype=float))
-
-        forme_attendue = (len(self.categories), len(self.distances))
-        if self.mesures_brutes.ndim != 3 or self.mesures_brutes.shape[:2] != forme_attendue:
-            raise ValueError(
-                f"{self.nom}: mesures_brutes doit avoir la forme "
-                f"(n_categories, n_distances, n_repetitions). "
-                f"Attendu {forme_attendue}, obtenu {self.mesures_brutes.shape}."
-            )
-
-    @property
-    def moyenne(self) -> np.ndarray:
-        return np.mean(self.mesures_brutes, axis=2)
-
-    @property
-    def ecart_type(self) -> np.ndarray:
-        return np.std(self.mesures_brutes, axis=2)
+def draw_glow(surf, color, cx, cy, r):
+    for i in range(3, 0, -1):
+        alpha = 60 - i * 15
+        d = r * i * 2
+        s = pygame.Surface((d * 2, d * 2), pygame.SRCALPHA)
+        pygame.draw.circle(s, (*color, alpha), (d, d), d)
+        surf.blit(s, (cx - d, cy - d))
+    pygame.draw.circle(surf, color, (int(cx), int(cy)), r)
 
 
-@dataclass(frozen=True)
-class ResultatFit:
-    nom_modele: str
-    noms_parametres: tuple[str, ...]
-    parametres: np.ndarray
-    erreurs: np.ndarray
-    chi2: float
-    ddl: int
+# ── Histogram export (pure pygame, no matplotlib) ────────────────────────────
 
-    @property
-    def chi2_reduit(self) -> float:
-        return self.chi2 / self.ddl if self.ddl > 0 else np.nan
+def render_histogram(detections_x: list, sim_width: int,
+                     voltage: int, recomb_steps: int,
+                     n_bins: int = HIST_BINS) -> pygame.Surface:
+    """
+    Render a histogram of cathode-hit x-positions onto a Surface.
+    Returns the Surface (can be blitted or saved).
+    """
+    surf = pygame.Surface((HIST_W, HIST_H))
+    surf.fill(HIST_BG)
+
+    font_s  = pygame.font.SysFont("monospace", 11)
+    font_m  = pygame.font.SysFont("monospace", 13, bold=True)
+    font_t  = pygame.font.SysFont("monospace", 10)
+
+    chart_x = HIST_MARGIN
+    chart_y = HIST_MARGIN
+    chart_w = HIST_W - 2 * HIST_MARGIN
+    chart_h = HIST_H - 2 * HIST_MARGIN - 30   # room for title at bottom
+
+    # Grid
+    pygame.draw.rect(surf, HIST_GRID,
+                     (chart_x, chart_y, chart_w, chart_h), 1)
+    n_grid = 5
+    for gi in range(1, n_grid):
+        gy = chart_y + int(gi / n_grid * chart_h)
+        pygame.draw.line(surf, HIST_GRID,
+                         (chart_x, gy), (chart_x + chart_w, gy))
+
+    if not detections_x:
+        msg = font_m.render("Aucune détection enregistrée", True, (120, 130, 160))
+        surf.blit(msg, (HIST_W // 2 - msg.get_width() // 2,
+                        HIST_H // 2))
+        return surf
+
+    # Bin counts
+    min_x, max_x = 0, sim_width
+    bins = [0] * n_bins
+    for x in detections_x:
+        b = int((x - min_x) / (max_x - min_x) * n_bins)
+        b = max(0, min(n_bins - 1, b))
+        bins[b] += 1
+
+    max_count = max(bins) if bins else 1
+    bar_w = chart_w / n_bins
+
+    # Bars
+    for i, count in enumerate(bins):
+        bx = chart_x + int(i * bar_w)
+        bh = int(count / max_count * chart_h)
+        by = chart_y + chart_h - bh
+        bw = max(1, int(bar_w) - 2)
+
+        # Gradient effect: brighter at top
+        for row in range(bh):
+            frac   = 1 - row / max(bh, 1)
+            bright = tuple(int(c * (0.5 + 0.5 * frac)) for c in HIST_BAR)
+            pygame.draw.line(surf, bright,
+                             (bx, by + row), (bx + bw, by + row))
+
+        # Count label on tall bars
+        if count > 0 and bh > 20:
+            lbl = font_t.render(str(count), True, (180, 200, 230))
+            surf.blit(lbl, (bx + bw // 2 - lbl.get_width() // 2, by - 14))
+
+    # Y-axis labels
+    for gi in range(n_grid + 1):
+        val = int(max_count * (1 - gi / n_grid))
+        gy  = chart_y + int(gi / n_grid * chart_h)
+        lbl = font_t.render(str(val), True, (100, 110, 140))
+        surf.blit(lbl, (chart_x - lbl.get_width() - 4,
+                        gy - lbl.get_height() // 2))
+
+    # X-axis labels (position in px mapped to %)
+    n_xlabels = 6
+    for xi in range(n_xlabels + 1):
+        px_val = int(xi / n_xlabels * sim_width)
+        pct    = int(xi / n_xlabels * 100)
+        gx     = chart_x + int(xi / n_xlabels * chart_w)
+        lbl    = font_t.render(f"{pct}%", True, (100, 110, 140))
+        surf.blit(lbl, (gx - lbl.get_width() // 2,
+                        chart_y + chart_h + 4))
+        pygame.draw.line(surf, HIST_GRID,
+                         (gx, chart_y), (gx, chart_y + chart_h))
+
+    # Axis titles
+    title = font_m.render(
+        f"Distribution des impacts à la cathode  —  V={voltage}V  "
+        f"recomb.={recomb_steps if recomb_steps > 0 else 'OFF'} pas",
+        True, TEXT_COL)
+    surf.blit(title, (HIST_W // 2 - title.get_width() // 2, 10))
+
+    xlabel = font_s.render("Position X sur la cathode (% de la largeur)", True, (120, 130, 160))
+    surf.blit(xlabel, (HIST_W // 2 - xlabel.get_width() // 2, HIST_H - 18))
+
+    ylabel_surf = font_s.render("Nombre d'impacts", True, (120, 130, 160))
+    ylabel_rot  = pygame.transform.rotate(ylabel_surf, 90)
+    surf.blit(ylabel_rot, (6, HIST_H // 2 - ylabel_rot.get_height() // 2))
+
+    # Total
+    total_lbl = font_s.render(f"Total : {len(detections_x)} détections  |  {n_bins} bins",
+                               True, (140, 150, 170))
+    surf.blit(total_lbl, (chart_x, chart_y + chart_h + 18))
+
+    return surf
 
 
-class Traceur:
-    @staticmethod
-    def grille_vs_distance(
-        jeu_donnees: JeuDonneesGrille,
-        titre: str,
-        log_x: bool = False,
-        log_y: bool = False,
-    ) -> None:
-        plot_grille_vs_distance(
-            distances=jeu_donnees.distances,
-            tensions=jeu_donnees.tensions,
-            moyenne=jeu_donnees.moyenne,
-            ecart_type=jeu_donnees.ecart_type,
-            titre=titre,
-            log_x=log_x,
-            log_y=log_y,
+# ── Main app ─────────────────────────────────────────────────────────────────
+
+class App:
+    def __init__(self):
+        pygame.init()
+        self.screen = pygame.display.set_mode((WIN_W, WIN_H))
+        pygame.display.set_caption("Simulation : Avalanche de Townsend")
+        self.clock  = pygame.time.Clock()
+
+        self.font_s = pygame.font.SysFont("monospace", 12)
+        self.font_m = pygame.font.SysFont("monospace", 14, bold=True)
+        self.font_l = pygame.font.SysFont("monospace", 18, bold=True)
+        self.font_t = pygame.font.SysFont("monospace", 11)
+
+        self.voltage          = 500
+        self.n_atoms          = N_ATOMS
+        self.recomb_steps     = 80     # 0 = disabled
+        self.playing          = False
+        self.step_idx         = 0
+        self.dragging_time    = False
+        self.dragging_recomb  = False
+        self.flash_list       = []
+
+        # Histogram state
+        self.show_hist        = False
+        self.hist_surface     = None
+        self.export_msg       = ""
+        self.export_msg_timer = 0
+
+        self._run_simulation()
+
+    # ── Simulation ────────────────────────────────────────────────────────────
+
+    def _run_simulation(self):
+        self.sim = AvalancheSimulation(
+            width=SIM_W, height=SIM_H,
+            n_atoms=self.n_atoms,
+            voltage=self.voltage,
+            recombination_steps=self.recomb_steps,
+            seed=int(time.time()) % 10000
         )
+        self.snapshots = self.sim.run_full(N_STEPS)
+        self.total     = len(self.snapshots)
+        self.step_idx  = 0
+        self.flash_list = []
+        self.hist_surface = None
 
-    @staticmethod
-    def grille_vs_tension(jeu_donnees: JeuDonneesGrille, titre: str, log_y: bool = False) -> None:
-        plot_grille_vs_tension(
-            distances=jeu_donnees.distances,
-            tensions=jeu_donnees.tensions,
-            moyenne=jeu_donnees.moyenne,
-            ecart_type=jeu_donnees.ecart_type,
-            titre=titre,
-            log_y=log_y,
-        )
+    def _get_detections_up_to_step(self):
+        """Return list of X positions of cathode hits up to current step."""
+        snap = self.snapshots[self.step_idx]
+        return [e['x'] for e in snap['events'] if e['type'] == 'detected']
 
-    @staticmethod
-    def serie_vs_distance(jeu_donnees: JeuDonneesSerie, titre: str) -> None:
-        plot_serie_vs_distance(
-            distances=jeu_donnees.distances,
-            moyenne=jeu_donnees.moyenne,
-            ecart_type=jeu_donnees.ecart_type,
-            titre=titre,
-            label=jeu_donnees.nom,
-        )
+    # ── Export ────────────────────────────────────────────────────────────────
 
-    @staticmethod
-    def multi_serie_vs_distance(jeu_donnees: JeuDonneesMultiSerie, titre: str) -> None:
-        plot_multi_serie_vs_distance(
-            distances=jeu_donnees.distances,
-            categories=jeu_donnees.categories,
-            moyenne=jeu_donnees.moyenne,
-            ecart_type=jeu_donnees.ecart_type,
-            titre=titre,
-        )
+    def _export(self):
+        detections = self._get_detections_up_to_step()
+        timestamp  = time.strftime("%Y%m%d_%H%M%S")
+        base       = f"avalanche_export_{timestamp}"
 
-    @staticmethod
-    def courbe_ajustee(
-        x: np.ndarray,
-        y: np.ndarray,
-        y_erreur: np.ndarray,
-        x_fit: np.ndarray,
-        y_fit: np.ndarray,
-        titre: str,
-        etiquette: str
-        ) -> None:
-        plot_courbe_ajustee(
-            x=x,
-            y=y,
-            y_erreur=y_erreur,
-            x_fit=x_fit,
-            y_fit=y_fit,
-            titre=titre,
-            etiquette=etiquette,
-        )
+        # CSV: raw x positions
+        csv_path = base + ".csv"
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["impact_x_px",
+                             "impact_x_pct",
+                             "voltage_V",
+                             "recomb_steps"])
+            for x in detections:
+                writer.writerow([round(x, 2),
+                                 round(x / SIM_W * 100, 2),
+                                 self.voltage,
+                                 self.recomb_steps])
 
+        # PNG: render histogram and save via pygame
+        png_path = base + ".png"
+        hist_surf = render_histogram(
+            detections, SIM_W, self.voltage, self.recomb_steps)
+        pygame.image.save(hist_surf, png_path)
 
-class ModelesFit:
-    @staticmethod
-    def inverse_carre(x: np.ndarray, a: float, b: float) -> np.ndarray:
-        return a / (x + b) ** 2
+        self.export_msg       = f"Exporté : {csv_path}  +  {png_path}"
+        self.export_msg_timer = 180   # frames
 
-    @staticmethod
-    def inverse_carre_plus_exp(x: np.ndarray, a: float, b: float, c: float, lam: float) -> np.ndarray:
-        return (a / (x + b) ** 2) + c * np.exp(-lam * x)
+    # ── Coordinate helpers ────────────────────────────────────────────────────
 
-    @staticmethod
-    def inverse_carre_avec_ecran(x: np.ndarray, a: float, b: float, mu: float, epaisseur: float, nb_plaques: int) -> np.ndarray:
-        return (a / (x + b) ** 2) * np.exp(-mu * epaisseur * nb_plaques)
+    def to_screen(self, x, y):
+        return int(SIM_X + x), int(SIM_Y + y)
 
-    @staticmethod
-    def exponentielle_plus_constante(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
-        return a * np.exp(-b * x) + c
+    # ── Drawing: main scene ───────────────────────────────────────────────────
 
+    def draw_scene(self, snap):
+        pygame.draw.rect(self.screen, PANEL_COL,
+                         (SIM_X, SIM_Y, SIM_W, SIM_H), border_radius=6)
 
-class Analyseur:
-    def __init__(self) -> None:
-        (
-            self.geiger_ancien,
-            self.geiger_nouveau,
-            self.attenuation_plomb,
-            self.attenuation_cs,
-        ) = charger_jeux_donnees()
+        # Electrodes
+        pygame.draw.line(self.screen, ANODE_COL,
+                         (SIM_X, SIM_Y), (SIM_X + SIM_W, SIM_Y), 3)
+        pygame.draw.line(self.screen, CATHODE_COL,
+                         (SIM_X, SIM_Y + SIM_H), (SIM_X + SIM_W, SIM_Y + SIM_H), 3)
 
-    @staticmethod
-    def _sigma_securise(y_erreur: np.ndarray) -> np.ndarray:
-        y_erreur = np.asarray(y_erreur, dtype=float)
-        return np.where(y_erreur <= 0, 1e-9, y_erreur)
+        # Field lines (faint)
+        for xi in range(0, SIM_W, 30):
+            s = pygame.Surface((1, SIM_H), pygame.SRCALPHA)
+            s.fill((80, 120, 200, 18))
+            self.screen.blit(s, (SIM_X + xi, SIM_Y))
 
-    @staticmethod
-    def _executer_actions_nommees(actions: dict[str, callable], selection: list[str] | None, type_action: str) -> None:
-        if selection is None:
-            cles = list(actions.keys())
-        else:
-            jetons = [element.strip() for element in selection if element.strip()]
-            if "all" in jetons or "tout" in jetons:
-                cles = list(actions.keys())
+        # Atoms (5-tuple now includes recombine_flash)
+        for entry in snap['atoms']:
+            ax, ay, ionised, excited, recomb_flash = entry
+            sx, sy = self.to_screen(ax, ay)
+
+            if recomb_flash > 0:
+                # Recombination glow (green, fading)
+                alpha = int(recomb_flash * 180)
+                r_size = int(6 + recomb_flash * 10)
+                gs = pygame.Surface((r_size * 4, r_size * 4), pygame.SRCALPHA)
+                pygame.draw.circle(gs, (*ATOM_RECOMB, alpha),
+                                   (r_size * 2, r_size * 2), r_size * 2)
+                self.screen.blit(gs, (sx - r_size * 2, sy - r_size * 2))
+                pygame.draw.circle(self.screen, ATOM_RECOMB, (sx, sy), 4)
+
+            elif ionised:
+                draw_glow(self.screen, ATOM_ION, sx, sy, 6)
+            elif excited:
+                draw_glow(self.screen, ATOM_EXC, sx, sy, 5)
             else:
-                cles = [jeton for jeton in jetons if jeton not in {"none", "aucun"}]
-                if not cles:
-                    return
+                pygame.draw.circle(self.screen, ATOM_NEUT, (sx, sy), 4)
+                pygame.draw.circle(self.screen, (90, 110, 140), (sx, sy), 4, 1)
 
-        invalides = [cle for cle in cles if cle not in actions]
-        if invalides:
-            choix_valides = ", ".join(actions.keys())
-            raise ValueError(f"{type_action}s inconnus: {invalides}. Choix valides: {choix_valides}")
+        # Ionisation flashes
+        new_flashes = []
+        for (fx, fy, timer) in self.flash_list:
+            if timer > 0:
+                sx, sy = self.to_screen(fx, fy)
+                r = int(8 + (1 - timer) * 20)
+                alpha = int(timer * 200)
+                s = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+                pygame.draw.circle(s, (*IONISE_FLASH, alpha), (r, r), r)
+                self.screen.blit(s, (sx - r, sy - r))
+                new_flashes.append((fx, fy, timer - 0.07))
+        self.flash_list = new_flashes
 
-        for cle in cles:
-            actions[cle]()
+        for ev in snap['events']:
+            if ev['type'] == 'ionisation':
+                if not any(abs(fx - ev['x']) < 5 and abs(fy - ev['y']) < 5
+                           for fx, fy, _ in self.flash_list):
+                    self.flash_list.append((ev['x'], ev['y'], 1.0))
 
-    def tracer_geiger_1_distance(self) -> None:
-        Traceur.grille_vs_distance(
-            self.geiger_ancien,
-            "Geiger 1 - Distance (series en tension)",
-        )
+        # Ions
+        for px, py, trail in snap['ions']:
+            sx, sy = self.to_screen(px, py)
+            for k in range(1, len(trail)):
+                a_pct = k / len(trail)
+                color = tuple(int(c * a_pct * 0.5) for c in TRAIL_I)
+                pygame.draw.line(self.screen, color,
+                                 self.to_screen(*trail[k - 1]),
+                                 self.to_screen(*trail[k]), 1)
+            draw_glow(self.screen, ION_C, sx, sy, 3)
 
-    def tracer_geiger_1_tension(self) -> None:
-        Traceur.grille_vs_tension(
-            self.geiger_ancien,
-            "Geiger 1 - Tension (series en distance)",
-        )
+        # Electrons
+        for px, py, trail in snap['electrons']:
+            sx, sy = self.to_screen(px, py)
+            for k in range(1, len(trail)):
+                a_pct = k / len(trail)
+                color = tuple(int(c * a_pct * 0.7) for c in TRAIL_E)
+                pygame.draw.line(self.screen, color,
+                                 self.to_screen(*trail[k - 1]),
+                                 self.to_screen(*trail[k]), 1)
+            draw_glow(self.screen, ELECTRON_C, sx, sy, 4)
 
-    def tracer_geiger_2_distance(self) -> None:
-        Traceur.grille_vs_distance(
-            self.geiger_nouveau,
-            "Geiger 2 - Distance (series en tension)",
-        )
+        # Electrode labels
+        lbl_a = self.font_s.render("+ Anode", True, ANODE_COL)
+        lbl_c = self.font_s.render("- Cathode (détecteur)", True, CATHODE_COL)
+        self.screen.blit(lbl_a, (SIM_X + 4, SIM_Y + 4))
+        self.screen.blit(lbl_c, (SIM_X + 4, SIM_Y + SIM_H - 16))
 
-    def tracer_geiger_2_tension(self) -> None:
-        Traceur.grille_vs_tension(
-            self.geiger_nouveau,
-            "Geiger 2 - Tension (series en distance)",
-        )
+    # ── Drawing: right panel ──────────────────────────────────────────────────
 
-    def tracer_attenuation_plomb(self) -> None:
-        Traceur.serie_vs_distance(
-            self.attenuation_plomb,
-            "Attenuation plomb - Distance",
-        )
+    def draw_panel(self, snap):
+        x, y = PANEL_X, SIM_Y
+        w    = PANEL_W
+        draw_rrect(self.screen, PANEL_COL, (x, y, w, SIM_H), r=6)
 
-    def tracer_geiger_2_distance_avec_plomb(self) -> None:
-        Traceur.multi_serie_vs_distance(
-            self.attenuation_cs,
-            "Geiger 2 - Distance avec plaques de plomb",
-        )
+        def row(label, value, col=TEXT_COL):
+            nonlocal y
+            y += 22
+            lbl = self.font_t.render(label, True, (120, 130, 160))
+            val = self.font_m.render(str(value), True, col)
+            self.screen.blit(lbl, (x + 8, y))
+            self.screen.blit(val, (x + 8, y + 13))
 
-    def actions_graphes(self) -> dict[str, callable]:
-        return {
-            "geiger_1_distance": self.tracer_geiger_1_distance,
-            "geiger_1_tension": self.tracer_geiger_1_tension,
-            "geiger_2_distance": self.tracer_geiger_2_distance,
-            "geiger_2_tension": self.tracer_geiger_2_tension,
-            "attenuation_plomb": self.tracer_attenuation_plomb,
-            "geiger_2_distance_avec_plomb": self.tracer_geiger_2_distance_avec_plomb,
-        }
+        y = SIM_Y + 6
+        self.screen.blit(self.font_l.render("Paramètres", True, TEXT_COL),
+                         (x + 8, y))
 
-    def executer_graphes(self, selection: list[str] | None = None) -> None:
-        self._executer_actions_nommees(self.actions_graphes(), selection, "graphe")
+        y += 30
+        row("Tension", f"{self.voltage} V", ANODE_COL)
+        row("Gaz", self.sim.gas)
+        row("Pot. ionisation",
+            f"{15.7} eV" if self.sim.gas == 'Ar' else "21.6 eV")
+        row("Champ E", f"{self.sim.E_field:.3f} eV/px")
+        row("Atomes", self.n_atoms)
 
-    def fit_generique(self, nom_modele: str, modele, x: np.ndarray, y: np.ndarray, y_erreur: np.ndarray, p0: list[float], noms_parametres: tuple[str, ...], titre: str,) -> ResultatFit:
-        sigma = self._sigma_securise(y_erreur)
-        parametres, covariance = curve_fit(modele, x, y, sigma=sigma, absolute_sigma=True, p0=p0)
-        erreurs = np.sqrt(np.diag(covariance))
+        # Recombination slider
+        y += 14
+        recomb_label = ("OFF" if self.recomb_steps == 0
+                        else f"{self.recomb_steps} pas")
+        self.screen.blit(
+            self.font_t.render("Recombinaison", True, (120, 130, 160)),
+            (x + 8, y))
+        self.screen.blit(
+            self.font_m.render(recomb_label, True, ATOM_RECOMB),
+            (x + 8, y + 13))
 
-        y_points_fit = modele(x, *parametres)
-        chi2 = float(np.sum(((y - y_points_fit) / sigma) ** 2))
-        ddl = int(len(y) - len(parametres))
+        y += 28
+        rs_y = y
+        rs_w = w - 16
+        self._recomb_slider_rect = (x + 8, rs_y, rs_w, 14)
+        draw_rrect(self.screen, SLIDER_BG,
+                   self._recomb_slider_rect, r=4)
+        max_r = 200
+        frac  = self.recomb_steps / max_r
+        fill_w = int(frac * rs_w)
+        if fill_w > 4:
+            draw_rrect(self.screen, ATOM_RECOMB,
+                       (x + 8, rs_y, fill_w, 14), r=4)
+        pygame.draw.circle(self.screen, (200, 240, 220),
+                           (x + 8 + fill_w, rs_y + 7), 8)
+        self.screen.blit(
+            self.font_t.render("[  ]  ou glisser", True, (80, 100, 120)),
+            (x + 8, rs_y + 16))
 
-        resultat = ResultatFit(
-            nom_modele=nom_modele,
-            noms_parametres=noms_parametres,
-            parametres=parametres,
-            erreurs=erreurs,
-            chi2=chi2,
-            ddl=ddl,
-        )
+        y += 38
+        self.screen.blit(self.font_l.render("État actuel", True, TEXT_COL),
+                         (x + 8, y))
 
-        self._afficher_fit(resultat)
+        row("Étape", f"{self.step_idx + 1} / {self.total}")
+        row("Électrons libres", snap['n_electrons'], ELECTRON_C)
+        row("Atomes ionisés", snap['n_ionised'], ATOM_ION)
+        row("Ions Ar⁺", len(snap['ions']), ION_C)
+        row("Ionisations totales",
+            sum(1 for e in snap['events'] if e['type'] == 'ionisation'),
+            IONISE_FLASH)
+        row("Recombinées",
+            sum(1 for e in snap['events'] if e['type'] == 'recombined'),
+            ATOM_RECOMB)
+        row("Détections cathode",
+            sum(1 for e in snap['events'] if e['type'] == 'detected'),
+            CATHODE_COL)
 
-        x_fit = np.linspace(np.min(x), np.max(x), 300)
-        y_fit = modele(x_fit, *parametres)
-        etiquette_parametres = ", ".join(
-            f"{nom}={valeur:.3f}" for nom, valeur in zip(noms_parametres, parametres)
-        )
-        Traceur.courbe_ajustee(
-            x,
-            y,
-            sigma,
-            x_fit,
-            y_fit,
-            titre,
-            f"Fit: {etiquette_parametres}, chi2/ddl={resultat.chi2_reduit:.3f}",
-        )
+        # Mini electron history graph
+        y += 26
+        graph_h = 72
+        graph_w = w - 16
+        graph_rect = (x + 8, y, graph_w, graph_h)
+        pygame.draw.rect(self.screen, (20, 28, 48), graph_rect, border_radius=4)
+        pygame.draw.rect(self.screen, SLIDER_BG, graph_rect, 1, border_radius=4)
+        self.screen.blit(
+            self.font_t.render("Électrons libres", True, (100, 110, 140)),
+            (x + 8, y - 13))
+        history = [s['n_electrons'] for s in self.snapshots[:self.step_idx + 1]]
+        max_e = max(history) if history else 1
+        if len(history) > 1 and max_e > 0:
+            pts = []
+            for i, v in enumerate(history):
+                gx = x + 8 + int(i / (len(history) - 1) * (graph_w - 2))
+                gy = y + graph_h - 4 - int(v / max_e * (graph_h - 8))
+                pts.append((gx, gy))
+            if len(pts) >= 2:
+                pygame.draw.lines(self.screen, ELECTRON_C, False, pts, 2)
 
-        return resultat
+        y += graph_h + 16
+        self.screen.blit(self.font_l.render("Contrôles", True, TEXT_COL),
+                         (x + 8, y))
+        controls = [
+            ("ESPACE", "Lecture / Pause"),
+            ("← →",    "Pas par pas"),
+            ("R",      "Nouvelle simulation"),
+            ("+  -",   "Tension ±100 V"),
+            ("[  ]",   "Recomb. ±10 pas"),
+            ("H",      "Histogramme"),
+            ("E",      "Exporter CSV+PNG"),
+            ("ESC",    "Quitter"),
+        ]
+        for key, desc in controls:
+            y += 17
+            self.screen.blit(self.font_s.render(key,  True, SLIDER_FG),
+                             (x + 8,      y))
+            self.screen.blit(self.font_t.render(desc, True, (140, 150, 170)),
+                             (x + 8 + 42, y))
 
-    @staticmethod
-    def _afficher_fit(resultat: ResultatFit) -> None:
-        print(f"\nModèle: {resultat.nom_modele}")
-        for nom, valeur, erreur in zip(resultat.noms_parametres, resultat.parametres, resultat.erreurs):
-            print(f"{nom} = {valeur:.4f} ± {erreur:.4f}")
-        print(f"chi2 = {resultat.chi2:.4f}")
-        print(f"ddl = {resultat.ddl}")
-        print(f"chi2/ddl = {resultat.chi2_reduit:.4f}")
+    # ── Drawing: header ───────────────────────────────────────────────────────
 
-    def fit_geiger_1_distance_modele_1(self) -> ResultatFit:
-        return self.fit_generique(
-            nom_modele="1/(x+b)^2 (geiger ancien, index tension 2)",
-            modele=ModelesFit.inverse_carre,
-            x=self.geiger_ancien.distances,
-            y=self.geiger_ancien.moyenne[:, 2],
-            y_erreur=self.geiger_ancien.ecart_type[:, 2],
-            p0=[0.1, 0.02],
-            noms_parametres=("a", "b"),
-            titre="Geiger 1 - Distance (a/(x+b)^2)",
-        )
+    def draw_header(self):
+        title = self.font_l.render(
+            "  Avalanche de Townsend — Compteur Geiger", True, TEXT_COL)
+        self.screen.blit(title, (10, 14))
 
-    def fit_geiger_2_distance_modele_1(self) -> ResultatFit:
-        return self.fit_generique(
-            nom_modele="1/(x+b)^2 (geiger nouveau, index tension 2)",
-            modele=ModelesFit.inverse_carre,
-            x=self.geiger_nouveau.distances,
-            y=self.geiger_nouveau.moyenne[:, 2],
-            y_erreur=self.geiger_nouveau.ecart_type[:, 2],
-            p0=[0.3, 0.03],
-            noms_parametres=("a", "b"),
-            titre="Geiger 2 - Distance (a/(x+b)^2)",
-        )
+        state = "▶ LECTURE" if self.playing else "⏸ PAUSE"
+        col   = (100, 220, 100) if self.playing else (200, 150, 50)
+        self.screen.blit(self.font_m.render(state, True, col),
+                         (WIN_W - 130, 14))
 
-    def fit_geiger_2_distance_modele_2(self) -> ResultatFit:
-        return self.fit_generique(
-            nom_modele="1/(x+b)^2 + c*exp(-lambda*x) (geiger nouveau, index tension 2)",
-            modele=ModelesFit.inverse_carre_plus_exp,
-            x=self.geiger_nouveau.distances,
-            y=self.geiger_nouveau.moyenne[:, 2],
-            y_erreur=self.geiger_nouveau.ecart_type[:, 2],
-            p0=[0.3, 0.03, -13.0, 50.0],
-            noms_parametres=("a", "b", "c", "lambda"),
-            titre="Geiger 2 - Distance (a/(x+b)^2 + c*exp(-lambda*x))",
-        )
+        # Export feedback
+        if self.export_msg_timer > 0:
+            alpha = min(255, self.export_msg_timer * 4)
+            msg   = self.font_s.render(self.export_msg, True, EXPORT_OK)
+            self.screen.blit(msg, (10, WIN_H - 30))
+            self.export_msg_timer -= 1
 
-    def fit_attenuation_plomb_modele_1(
-        self,
-        nb_plaques: int = 1,
-        epaisseur: float = 3e-3,
-    ) -> ResultatFit:
-        return self.fit_generique(
-            nom_modele="1/(x+b)^2 * exp(-mu*e*n) (attenuation)",
-            modele=lambda x, a, b, mu: ModelesFit.inverse_carre_avec_ecran(x, a, b, mu, epaisseur, nb_plaques),
-            x=self.attenuation_plomb.distances,
-            y=self.attenuation_plomb.moyenne,
-            y_erreur=self.attenuation_plomb.ecart_type,
-            p0=[0.3, 0.03, 1.0],
-            noms_parametres=("a", "b", "mu"),
-            titre="Attenuation plomb - Distance ((a/(x+b)^2)*exp(-mu*e*n))",
-        )
+    # ── Drawing: time scrubber ────────────────────────────────────────────────
 
-    def fit_attenuation_plomb_modele_2(self) -> ResultatFit:
-        y = self.attenuation_plomb.moyenne
-        c0 = float(np.min(y))
-        a0 = float(np.max(y) - c0)
-        b0 = 15.0
-        return self.fit_generique(
-            nom_modele="a*exp(-b*x)+c (attenuation plomb)",
-            modele=ModelesFit.exponentielle_plus_constante,
-            x=self.attenuation_plomb.distances,
-            y=y,
-            y_erreur=self.attenuation_plomb.ecart_type,
-            p0=[a0, b0, c0],
-            noms_parametres=("a", "b", "c"),
-            titre="Attenuation plomb - Distance (a*exp(-b*d)+c)",
-        )
+    def draw_scrubber(self):
+        draw_rrect(self.screen, SLIDER_BG,
+                   (SLIDER_X, SLIDER_Y, SLIDER_W, SLIDER_H), r=6)
+        fill_w = int(self.step_idx / max(1, self.total - 1) * SLIDER_W)
+        if fill_w > 4:
+            draw_rrect(self.screen, SLIDER_FG,
+                       (SLIDER_X, SLIDER_Y, fill_w, SLIDER_H), r=6)
+        thumb_x = SLIDER_X + fill_w
+        pygame.draw.circle(self.screen, (220, 230, 255),
+                           (thumb_x, SLIDER_Y + SLIDER_H // 2), 10)
+        pct = self.step_idx / max(1, self.total - 1) * 100
+        self.screen.blit(
+            self.font_s.render(
+                f"  Temps : étape {self.step_idx + 1}/{self.total}  ({pct:.0f}%)",
+                True, TEXT_COL),
+            (SLIDER_X, SLIDER_Y - 18))
 
-    def actions_fits(self) -> dict[str, callable]:
-        return {
-            "geiger_1_distance_modele_1": self.fit_geiger_1_distance_modele_1,
-            "geiger_2_distance_modele_1": self.fit_geiger_2_distance_modele_1,
-            "geiger_2_distance_modele_2": self.fit_geiger_2_distance_modele_2,
-            "attenuation_plomb_modele_1": self.fit_attenuation_plomb_modele_1,
-            "attenuation_plomb_modele_2": self.fit_attenuation_plomb_modele_2,
-        }
+    # ── Drawing: histogram overlay ────────────────────────────────────────────
 
-    def executer_fits(self, selection: list[str] | None = None) -> None:
-        self._executer_actions_nommees(self.actions_fits(), selection, "fit")
+    def draw_histogram_overlay(self):
+        detections = self._get_detections_up_to_step()
+        # Re-render only if needed (lazy)
+        if self.hist_surface is None:
+            self.hist_surface = render_histogram(
+                detections, SIM_W, self.voltage, self.recomb_steps)
 
+        # Centre on screen
+        hx = (WIN_W - HIST_W) // 2
+        hy = (WIN_H - HIST_H) // 2
 
-def _decouper_arguments_csv(valeurs: list[str] | None) -> list[str]:
-    if not valeurs:
-        return []
-    jetons: list[str] = []
-    for valeur in valeurs:
-        for jeton in valeur.split(","):
-            propre = jeton.strip()
-            if propre:
-                jetons.append(propre)
-    return jetons
+        # Dim background
+        dim = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 170))
+        self.screen.blit(dim, (0, 0))
 
+        self.screen.blit(self.hist_surface, (hx, hy))
 
-def _construire_parseur_arguments() -> argparse.ArgumentParser:
-    parseur = argparse.ArgumentParser(
-        description="Analyse Geiger: affichage des graphes et ajustements.",
-    )
-    parseur.add_argument(
-        "--list",
-        action="store_true",
-        help="Liste les graphes/fits disponibles puis quitte.",
-    )
-    parseur.add_argument(
-        "--plots",
-        "--graphes",
-        dest="graphes",
-        nargs="+",
-        default=["none"],
-        help="Graphes a afficher (espace ou virgule). Utiliser all/tout ou none/aucun.",
-    )
-    parseur.add_argument(
-        "--graphe",
-        action="append",
-        default=[],
-        help="Raccourci pour afficher un graphe precis (option repetable).",
-    )
-    parseur.add_argument(
-        "--fits",
-        nargs="+",
-        default=["none"],
-        help="Fits a lancer (espace ou virgule). Utiliser all/tout ou none/aucun.",
-    )
-    parseur.add_argument(
-        "--fit",
-        action="append",
-        default=[],
-        help="Raccourci pour lancer un fit precis (option repetable).",
-    )
-    return parseur
+        # Close hint
+        close = self.font_m.render("H  ou  ESC  pour fermer", True, (140, 150, 170))
+        self.screen.blit(close,
+                         (hx + HIST_W // 2 - close.get_width() // 2,
+                          hy + HIST_H - 22))
 
+    # ── Slider interaction helpers ────────────────────────────────────────────
 
-def _afficher_options_disponibles(analyseur: Analyseur) -> None:
-    print("Graphes disponibles:")
-    for nom in analyseur.actions_graphes().keys():
-        print(f" - {nom}")
-    print("\nFits disponibles:")
-    for nom in analyseur.actions_fits().keys():
-        print(f" - {nom}")
-    print("\nRaccourcis: all/tout, none/aucun")
-    print("\nExemples:")
-    print(" - python3 main.py --graphe geiger_1_distance")
-    print(" - python3 main.py --fit geiger_2_distance_modele_1")
+    def in_time_scrubber(self, mx, my):
+        return (SLIDER_X <= mx <= SLIDER_X + SLIDER_W and
+                SLIDER_Y - 10 <= my <= SLIDER_Y + SLIDER_H + 10)
 
+    def in_recomb_slider(self, mx, my):
+        if not hasattr(self, '_recomb_slider_rect'):
+            return False
+        rx, ry, rw, rh = self._recomb_slider_rect
+        return rx <= mx <= rx + rw and ry - 8 <= my <= ry + rh + 8
 
-def _charger_grille_depuis_csv(path_csv: Path, nom: str) -> JeuDonneesGrille:
-    with path_csv.open(newline="", encoding="utf-8") as fichier:
-        lignes = list(csv.DictReader(fichier))
+    def update_time_from_mouse(self, mx):
+        frac = (mx - SLIDER_X) / SLIDER_W
+        self.step_idx = int(max(0, min(1, frac)) * (self.total - 1))
 
-    distances = np.array(sorted({float(ligne["distance_m"]) for ligne in lignes}), dtype=float)
-    tensions = np.array(sorted({float(ligne["tension_V"]) for ligne in lignes}), dtype=float)
-    repetitions = np.array(sorted({int(ligne["repetition"]) for ligne in lignes}), dtype=int)
+    def update_recomb_from_mouse(self, mx):
+        rx, ry, rw, rh = self._recomb_slider_rect
+        frac = (mx - rx) / rw
+        self.recomb_steps = int(max(0, min(1, frac)) * 200)
+        self.hist_surface = None   # invalidate histogram
 
-    mesures = np.full((len(distances), len(tensions), len(repetitions)), np.nan, dtype=float)
-    index_distance = {valeur: i for i, valeur in enumerate(distances)}
-    index_tension = {valeur: i for i, valeur in enumerate(tensions)}
-    index_repetition = {valeur: i for i, valeur in enumerate(repetitions)}
+    # ── Main loop ─────────────────────────────────────────────────────────────
 
-    for ligne in lignes:
-        d = index_distance[float(ligne["distance_m"])]
-        t = index_tension[float(ligne["tension_V"])]
-        r = index_repetition[int(ligne["repetition"])]
-        if not np.isnan(mesures[d, t, r]):
-            raise ValueError(f"{path_csv.name}: doublon detecte pour distance/tension/repetition.")
-        mesures[d, t, r] = float(ligne["coups_par_seconde"])
+    def run(self):
+        running = True
+        while running:
+            self.clock.tick(FPS)
 
-    if np.isnan(mesures).any():
-        raise ValueError(f"{path_csv.name}: valeurs manquantes dans la grille de mesures.")
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
 
-    return JeuDonneesGrille(
-        nom=nom,
-        distances=distances,
-        tensions=tensions,
-        mesures_brutes=mesures,
-    )
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        if self.show_hist:
+                            self.show_hist = False
+                        else:
+                            running = False
+                    elif event.key == pygame.K_q and not self.show_hist:
+                        running = False
+                    elif event.key == pygame.K_SPACE:
+                        self.playing = not self.playing
+                    elif event.key == pygame.K_RIGHT:
+                        self.step_idx = min(self.total - 1, self.step_idx + 1)
+                        self.hist_surface = None
+                    elif event.key == pygame.K_LEFT:
+                        self.step_idx = max(0, self.step_idx - 1)
+                        self.hist_surface = None
+                    elif event.key == pygame.K_r:
+                        self._run_simulation()
+                    elif event.key in (pygame.K_PLUS, pygame.K_EQUALS,
+                                       pygame.K_KP_PLUS):
+                        self.voltage = min(5000, self.voltage + 100)
+                        #self._run_simulation()
+                    elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                        self.voltage = max(50, self.voltage - 50)
+                        #self._run_simulation()
+                    elif event.key == pygame.K_RIGHTBRACKET:
+                        self.recomb_steps = min(200, self.recomb_steps + 10)
+                        self.hist_surface  = None
+                    elif event.key == pygame.K_LEFTBRACKET:
+                        self.recomb_steps = max(0, self.recomb_steps - 10)
+                        self.hist_surface  = None
+                    elif event.key == pygame.K_h:
+                        self.show_hist = not self.show_hist
+                        self.hist_surface = None
+                    elif event.key == pygame.K_e:
+                        self._export()
 
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    mx, my = event.pos
+                    if self.in_time_scrubber(mx, my):
+                        self.dragging_time = True
+                        self.playing = False
+                        self.update_time_from_mouse(mx)
+                        self.hist_surface = None
+                    elif self.in_recomb_slider(mx, my):
+                        self.dragging_recomb = True
+                        self.update_recomb_from_mouse(mx)
 
-def _charger_serie_depuis_csv(path_csv: Path, nom: str) -> JeuDonneesSerie:
-    with path_csv.open(newline="", encoding="utf-8") as fichier:
-        lignes = list(csv.DictReader(fichier))
+                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    self.dragging_time   = False
+                    self.dragging_recomb = False
 
-    distances = np.array(sorted({float(ligne["distance_m"]) for ligne in lignes}), dtype=float)
-    repetitions = np.array(sorted({int(ligne["repetition"]) for ligne in lignes}), dtype=int)
+                elif event.type == pygame.MOUSEMOTION:
+                    mx, my = event.pos
+                    if self.dragging_time:
+                        self.update_time_from_mouse(mx)
+                        self.hist_surface = None
+                    elif self.dragging_recomb:
+                        self.update_recomb_from_mouse(mx)
 
-    mesures = np.full((len(distances), len(repetitions)), np.nan, dtype=float)
-    index_distance = {valeur: i for i, valeur in enumerate(distances)}
-    index_repetition = {valeur: i for i, valeur in enumerate(repetitions)}
+            # Auto-advance
+            if self.playing:
+                self.step_idx += 1
+                if self.step_idx >= self.total:
+                    self.step_idx = self.total - 1
+                    self.playing  = False
+                self.hist_surface = None
 
-    for ligne in lignes:
-        d = index_distance[float(ligne["distance_m"])]
-        r = index_repetition[int(ligne["repetition"])]
-        if not np.isnan(mesures[d, r]):
-            raise ValueError(f"{path_csv.name}: doublon detecte pour distance/repetition.")
-        mesures[d, r] = float(ligne["coups_par_seconde"])
+            # ── Render ────────────────────────────────────────────────────
+            self.screen.fill(BG)
+            snap = self.snapshots[min(self.step_idx, self.total - 1)]
+            self.draw_header()
+            self.draw_scene(snap)
+            self.draw_panel(snap)
+            self.draw_scrubber()
 
-    if np.isnan(mesures).any():
-        raise ValueError(f"{path_csv.name}: valeurs manquantes dans la serie de mesures.")
+            if self.show_hist:
+                self.draw_histogram_overlay()
 
-    return JeuDonneesSerie(
-        nom=nom,
-        distances=distances,
-        mesures_brutes=mesures,
-    )
+            pygame.display.flip()
 
-
-def _charger_multi_serie_depuis_csv(path_csv: Path, nom: str) -> JeuDonneesMultiSerie:
-    with path_csv.open(newline="", encoding="utf-8") as fichier:
-        lignes = list(csv.DictReader(fichier))
-
-    categories = np.array(sorted({float(ligne["nb_plaques"]) for ligne in lignes}), dtype=float)
-    distances = np.array(sorted({float(ligne["distance_m"]) for ligne in lignes}), dtype=float)
-    repetitions = np.array(sorted({int(ligne["repetition"]) for ligne in lignes}), dtype=int)
-
-    mesures = np.full((len(categories), len(distances), len(repetitions)), np.nan, dtype=float)
-    index_categorie = {valeur: i for i, valeur in enumerate(categories)}
-    index_distance = {valeur: i for i, valeur in enumerate(distances)}
-    index_repetition = {valeur: i for i, valeur in enumerate(repetitions)}
-
-    for ligne in lignes:
-        c = index_categorie[float(ligne["nb_plaques"])]
-        d = index_distance[float(ligne["distance_m"])]
-        r = index_repetition[int(ligne["repetition"])]
-        if not np.isnan(mesures[c, d, r]):
-            raise ValueError(f"{path_csv.name}: doublon detecte pour categorie/distance/repetition.")
-        mesures[c, d, r] = float(ligne["coups_par_seconde"])
-
-    if np.isnan(mesures).any():
-        raise ValueError(f"{path_csv.name}: valeurs manquantes dans la multi-serie de mesures.")
-
-    return JeuDonneesMultiSerie(
-        nom=nom,
-        categories=categories,
-        distances=distances,
-        mesures_brutes=mesures,
-    )
-
-
-def charger_jeux_donnees() -> tuple[JeuDonneesGrille, JeuDonneesGrille, JeuDonneesSerie, JeuDonneesMultiSerie]:
-    base_dir = Path(__file__).resolve().parent / "Mesures" / "Geiger"
-    jeu_ancien = _charger_grille_depuis_csv(base_dir / "geiger_1_distance.csv", "Geiger 1")
-    jeu_nouveau = _charger_grille_depuis_csv(base_dir / "geiger_2_distance.csv", "Geiger 2")
-    jeu_attenuation = _charger_serie_depuis_csv(base_dir / "geiger_1_plomb.csv", "Attenuation plomb")
-    jeu_attenuation_cs = _charger_multi_serie_depuis_csv(base_dir / "geiger_2_plomb.csv", "Geiger 2 plomb")
-    return jeu_ancien, jeu_nouveau, jeu_attenuation, jeu_attenuation_cs
-
-
-def main() -> None:
-    parseur = _construire_parseur_arguments()
-    arguments = parseur.parse_args()
-
-    plt.close("all")
-    analyseur = Analyseur()
-    if arguments.list:
-        _afficher_options_disponibles(analyseur)
-        return
-
-    graphes_selectionnes = _decouper_arguments_csv(arguments.graphes) + arguments.graphe
-    fits_selectionnes = _decouper_arguments_csv(arguments.fits) + arguments.fit
-
-    analyseur.executer_graphes(graphes_selectionnes)
-    analyseur.executer_fits(fits_selectionnes)
-
-
-def afficher_graphe(nom_graphe: str) -> None:
-    """Affiche un seul graphe par son identifiant."""
-    plt.close("all")
-    analyseur = Analyseur()
-    analyseur.executer_graphes([nom_graphe])
-
-
-def lancer_fit(nom_fit: str) -> None:
-    """Lance un seul fit par son identifiant."""
-    plt.close("all")
-    analyseur = Analyseur()
-    analyseur.executer_fits([nom_fit])
+        pygame.quit()
+        sys.exit()
 
 
 if __name__ == "__main__":
-    main()
+    App().run()
